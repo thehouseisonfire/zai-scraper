@@ -1,0 +1,29 @@
+{
+  "name": "zai-conversation-scraper",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "scrape": "bun src/zai-to-markdown.ts",
+    "build": "tsc --project tsconfig.json",
+    "start": "node dist/zai-to-markdown.js",
+    "lint": "oxlint src/",
+    "lint:fix": "oxlint --fix src/",
+    "format": "oxfmt src/ README.md package.json tsconfig.json",
+    "format:check": "oxfmt --check src/ README.md package.json tsconfig.json",
+    "check": "bun run lint && bun run format:check && bun run build"
+  },
+  "dependencies": {
+    "playwright": "^1.62.0",
+    "turndown": "^7.2.4",
+    "turndown-plugin-gfm": "^1.0.2"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.2",
+    "@types/turndown": "^5.0.6",
+    "@types/bun": "latest",
+    "oxfmt": "^0.61.0",
+    "oxlint": "^1.76.0",
+    "typescript": "7"
+  }
+}

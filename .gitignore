@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.zai-profile/
+*.storage-state.json
+
+# Scraped content - do not track
+*.html
+*.md
+!README.md
