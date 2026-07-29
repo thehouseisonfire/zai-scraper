@@ -4,12 +4,7 @@ import { access, mkdir, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { parseArgs } from "node:util";
 
-import {
-  chromium,
-  errors as playwrightErrors,
-  type BrowserContext,
-  type Page,
-} from "playwright";
+import { chromium, errors as playwrightErrors, type BrowserContext, type Page } from "playwright";
 import TurndownService from "turndown";
 import turndownPluginGfm from "turndown-plugin-gfm";
 
@@ -54,11 +49,44 @@ interface ContextHandle {
   close(): Promise<void>;
 }
 
+interface PageJsonResponse {
+  ok: boolean;
+  status: number;
+  statusText: string;
+  data: unknown;
+  error: string | null;
+}
+
+interface ApiHistory {
+  currentId: string | null;
+  messages: Record<string, Record<string, unknown>>;
+}
+
+interface ApiConversation {
+  title?: string;
+  history: ApiHistory;
+}
+
+interface ApiScrapeResult {
+  metadata: Metadata;
+  messages: Message[];
+  endpoint: string;
+  historyMessageCount: number;
+  branchMessageCount: number;
+  branchComplete: boolean;
+}
+
+interface ApiEnrichmentResult {
+  requestEndpoint: string | null;
+  branchComplete: boolean;
+}
+
 const DEFAULT_TITLE = "Z.ai Conversation";
 const DEFAULT_TIMEOUT_MS = 60_000;
 const ZAI_HOSTNAMES = new Set(["chat.z.ai", "www.chat.z.ai"]);
 
-const TITLE_SUFFIX = /\s*(?:\||-|—)\s*(?:Z\.ai|ZAI|Chat Z\.ai)\s*$/i;
+const TITLE_SUFFIX =
+  /\s*(?:\||-|—)\s*(?:Z\.ai|ZAI|Chat Z\.ai)(?:\s*-\s*Advanced AI Chatbot[^|]*)?\s*$/i;
 const CONVERSATION_PATH = /^\/(?:c|s)\/[a-z0-9-]+(?:\/|$)/i;
 
 /**
@@ -70,21 +98,21 @@ const CONVERSATION_PATH = /^\/(?:c|s)\/[a-z0-9-]+(?:\/|$)/i;
 const MESSAGE_SELECTORS = [
   '#chat-container [id^="message-"]',
   '[id^="message-"]',
-  '#chat-container [data-message-author-role]',
+  "#chat-container [data-message-author-role]",
   '#chat-container [data-role="user"], #chat-container [data-role="assistant"]',
-  '#chat-container .user-message, #chat-container .assistant-message',
-  '#chat-container .chat-user, #chat-container .markdown-prose:not(.chat-user)',
-  '#chat-container .message-user, #chat-container .message-assistant',
-  '#chat-container .chat-message-user, #chat-container .chat-message-assistant',
-  '#chat-container article',
-  '#chat-container .prose',
+  "#chat-container .user-message, #chat-container .assistant-message",
+  "#chat-container .chat-user, #chat-container .markdown-prose:not(.chat-user)",
+  "#chat-container .message-user, #chat-container .message-assistant",
+  "#chat-container .chat-message-user, #chat-container .chat-message-assistant",
+  "#chat-container article",
+  "#chat-container .prose",
 ] as const;
 
 const CONVERSATION_CONTENT_SELECTOR = [
   '#chat-container [id^="message-"]',
   "#chat-container .chat-user",
   "#chat-container .markdown-prose:not(.chat-user)",
-  '#chat-container [data-message-author-role]',
+  "#chat-container [data-message-author-role]",
   '#chat-container [data-role="user"]',
   '#chat-container [data-role="assistant"]',
 ].join(", ");
@@ -190,9 +218,7 @@ function parseUrl(value: string): URL {
   }
 
   if (!CONVERSATION_PATH.test(url.pathname)) {
-    throw new UsageError(
-      "Expected a Z.ai conversation URL with /c/<id> or /s/<id> in its path.",
-    );
+    throw new UsageError("Expected a Z.ai conversation URL with /c/<id> or /s/<id> in its path.");
   }
 
   return url;
@@ -279,9 +305,7 @@ function parseCliOptions(argv: string[]): CliOptions {
     ...(values.selector !== undefined ? { selector: values.selector } : {}),
     ...(values["debug-html"] !== undefined ? { debugHtml: values["debug-html"] } : {}),
     ...(values["profile-dir"] !== undefined ? { profileDir: values["profile-dir"] } : {}),
-    ...(values["storage-state"] !== undefined
-      ? { storageState: values["storage-state"] }
-      : {}),
+    ...(values["storage-state"] !== undefined ? { storageState: values["storage-state"] } : {}),
     ...(values["save-storage-state"] !== undefined
       ? { saveStorageState: values["save-storage-state"] }
       : {}),
@@ -476,9 +500,8 @@ async function describeMissingConversation(page: Page, requestedUrl: URL): Promi
     };
   });
 
-  const looksLikeAuthentication = /\b(?:sign in|log in|login|continue with google|verify email)\b/i.test(
-    state.bodyText,
-  );
+  const looksLikeAuthentication =
+    /\b(?:sign in|log in|login|continue with google|verify email)\b/i.test(state.bodyText);
 
   if (looksLikeAuthentication || (requestedUrl.pathname.startsWith("/c/") && !state.hasChatInput)) {
     return [
@@ -518,11 +541,737 @@ async function waitForConversationContent(
   }
 }
 
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+
+  return value as Record<string, unknown>;
+}
+
+function firstString(record: Record<string, unknown>, keys: readonly string[]): string | undefined {
+  for (const key of keys) {
+    const value = record[key];
+
+    if (typeof value === "string" && value.trim().length > 0) {
+      return value.trim();
+    }
+  }
+
+  return undefined;
+}
+
+async function fetchPageJson(
+  page: Page,
+  endpoint: string,
+  init?: {
+    method?: "GET" | "POST";
+    body?: unknown;
+  },
+): Promise<PageJsonResponse> {
+  return page.evaluate(
+    async ({ url, method, body }): Promise<PageJsonResponse> => {
+      try {
+        const response = await fetch(url, {
+          method,
+          credentials: "include",
+          headers: {
+            accept: "application/json",
+            ...(body === null ? {} : { "content-type": "application/json" }),
+          },
+          ...(body === null ? {} : { body: JSON.stringify(body) }),
+        });
+
+        const text = await response.text();
+        let data: unknown = null;
+
+        if (text.length > 0) {
+          try {
+            data = JSON.parse(text) as unknown;
+          } catch {
+            data = text;
+          }
+        }
+
+        return {
+          ok: response.ok,
+          status: response.status,
+          statusText: response.statusText,
+          data,
+          error: null,
+        };
+      } catch (error) {
+        return {
+          ok: false,
+          status: 0,
+          statusText: "",
+          data: null,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    },
+    {
+      url: endpoint,
+      method: init?.method ?? "GET",
+      body: init?.body ?? null,
+    },
+  );
+}
+
+function normalizeApiMessageMap(value: unknown): Record<string, Record<string, unknown>> {
+  const output: Record<string, Record<string, unknown>> = {};
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const message = asRecord(item);
+      const id = message === undefined ? undefined : firstString(message, ["id", "message_id"]);
+
+      if (message !== undefined && id !== undefined) {
+        output[id] = { ...message, id };
+      }
+    }
+
+    return output;
+  }
+
+  const record = asRecord(value);
+
+  if (record === undefined) {
+    return output;
+  }
+
+  for (const [key, item] of Object.entries(record)) {
+    const message = asRecord(item);
+
+    if (message === undefined) {
+      continue;
+    }
+
+    const id = firstString(message, ["id", "message_id"]) ?? key;
+    output[id] = { ...message, id };
+  }
+
+  return output;
+}
+
+function parseApiConversation(payload: unknown): ApiConversation | undefined {
+  const root = asRecord(payload);
+
+  if (root === undefined) {
+    return undefined;
+  }
+
+  const data = asRecord(root.data);
+  const candidates = [
+    root,
+    data,
+    asRecord(root.chat),
+    data === undefined ? undefined : asRecord(data.chat),
+  ].filter((candidate): candidate is Record<string, unknown> => candidate !== undefined);
+
+  let historyRecord: Record<string, unknown> | undefined;
+
+  for (const candidate of candidates) {
+    const possibleHistory = asRecord(candidate.history);
+
+    if (possibleHistory !== undefined && possibleHistory.messages !== undefined) {
+      historyRecord = possibleHistory;
+      break;
+    }
+  }
+
+  if (historyRecord === undefined) {
+    return undefined;
+  }
+
+  const messages = normalizeApiMessageMap(historyRecord.messages);
+  const currentId = firstString(historyRecord, ["currentId", "current_id"]);
+
+  // Some Z.ai responses expose only currentId initially. The active branch can
+  // still be hydrated by requesting that message and following parentId links.
+  if (Object.keys(messages).length === 0 && currentId === undefined) {
+    return undefined;
+  }
+
+  const title =
+    firstString(root, ["title", "name"]) ??
+    (data === undefined ? undefined : firstString(data, ["title", "name"])) ??
+    candidates.map((candidate) => firstString(candidate, ["title", "name"])).find(Boolean);
+
+  return {
+    ...(title === undefined ? {} : { title }),
+    history: {
+      currentId: currentId ?? null,
+      messages,
+    },
+  };
+}
+
+function messageParentId(message: Record<string, unknown>): string | null {
+  const value = message.parentId ?? message.parent_id;
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function messageChildrenIds(message: Record<string, unknown>): string[] {
+  const value = message.childrenIds ?? message.children_ids;
+
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.filter((item): item is string => typeof item === "string" && item.length > 0);
+}
+
+function messageTimestamp(message: Record<string, unknown>): number {
+  const value = message.timestamp ?? message.created_at ?? message.createdAt;
+
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    const numeric = Number(value);
+
+    if (Number.isFinite(numeric)) {
+      return numeric;
+    }
+
+    const parsed = Date.parse(value);
+    return Number.isNaN(parsed) ? 0 : parsed;
+  }
+
+  return 0;
+}
+
+function chooseApiLeaf(history: ApiHistory): string | undefined {
+  if (history.currentId !== null && history.messages[history.currentId] !== undefined) {
+    return history.currentId;
+  }
+
+  const entries = Object.entries(history.messages);
+  const leaves = entries.filter(([, message]) =>
+    messageChildrenIds(message).every((childId) => history.messages[childId] === undefined),
+  );
+  const candidates = leaves.length > 0 ? leaves : entries;
+
+  candidates.sort((left, right) => messageTimestamp(right[1]) - messageTimestamp(left[1]));
+  return candidates[0]?.[0];
+}
+
+function activeApiBranchIds(history: ApiHistory): string[] {
+  const leaf = chooseApiLeaf(history);
+
+  if (leaf === undefined) {
+    return [];
+  }
+
+  const reversed: string[] = [];
+  const seen = new Set<string>();
+  let currentId: string | null = leaf;
+
+  while (currentId !== null && !seen.has(currentId)) {
+    const message = history.messages[currentId];
+
+    if (message === undefined) {
+      break;
+    }
+
+    reversed.push(currentId);
+    seen.add(currentId);
+    currentId = messageParentId(message);
+  }
+
+  return reversed.reverse();
+}
+
+function hasApiMessageContent(message: Record<string, unknown>): boolean {
+  const content = message.content;
+
+  if (typeof content === "string" && content.trim().length > 0) {
+    return true;
+  }
+
+  if (Array.isArray(content) && content.length > 0) {
+    return true;
+  }
+
+  return Array.isArray(message.files) && message.files.length > 0;
+}
+
+function mergeApiMessages(
+  history: ApiHistory,
+  messages: Record<string, Record<string, unknown>>,
+): void {
+  for (const [id, message] of Object.entries(messages)) {
+    history.messages[id] = {
+      ...history.messages[id],
+      ...message,
+      id,
+    };
+  }
+}
+
+async function fetchApiMessageBatch(
+  page: Page,
+  conversationId: string,
+  ids: readonly string[],
+): Promise<{
+  endpoint: string;
+  messages: Record<string, Record<string, unknown>>;
+} | null> {
+  if (ids.length === 0) {
+    return null;
+  }
+
+  // The chat-scoped endpoint is used by the current Z.ai web client. The
+  // unscoped form is retained as a compatibility fallback for deployments
+  // that expose the same batch handler at /api/v1/messages/batch.
+  const endpoints = [
+    `/api/v1/chats/${encodeURIComponent(conversationId)}/messages/batch`,
+    "/api/v1/messages/batch",
+  ] as const;
+
+  for (const endpoint of endpoints) {
+    const response = await fetchPageJson(page, endpoint, {
+      method: "POST",
+      body: { ids },
+    });
+
+    if (!response.ok) {
+      continue;
+    }
+
+    const payload = asRecord(response.data);
+    const messages = normalizeApiMessageMap(payload?.data ?? response.data);
+
+    if (Object.keys(messages).length > 0) {
+      return { endpoint, messages };
+    }
+  }
+
+  return null;
+}
+
+function isApiBranchComplete(history: ApiHistory): boolean {
+  const branch = activeApiBranchIds(history);
+  const oldestId = branch[0];
+
+  if (oldestId === undefined) {
+    return false;
+  }
+
+  return messageParentId(history.messages[oldestId] ?? {}) === null;
+}
+
+async function enrichApiMessages(
+  page: Page,
+  conversationId: string,
+  history: ApiHistory,
+): Promise<ApiEnrichmentResult> {
+  let requestEndpoint: string | null = null;
+
+  const fetchAndMerge = async (ids: readonly string[]): Promise<boolean> => {
+    const uniqueIds = Array.from(new Set(ids.filter((id) => id.length > 0)));
+
+    if (uniqueIds.length === 0) {
+      return false;
+    }
+
+    const result = await fetchApiMessageBatch(page, conversationId, uniqueIds);
+
+    if (result === null) {
+      return false;
+    }
+
+    requestEndpoint = result.endpoint;
+    mergeApiMessages(history, result.messages);
+    return true;
+  };
+
+  // Hydrate all references already exposed by metadata in bounded batches.
+  const knownIds = Object.keys(history.messages);
+  const incompleteKnownIds = knownIds.filter(
+    (id) => !hasApiMessageContent(history.messages[id] ?? {}),
+  );
+
+  for (let offset = 0; offset < incompleteKnownIds.length; offset += 100) {
+    const chunk = incompleteKnownIds.slice(offset, offset + 100);
+
+    if (!(await fetchAndMerge(chunk))) {
+      console.warn(
+        "[!] Z.ai message batch request failed; attempting to reconstruct the branch from the metadata already available.",
+      );
+      break;
+    }
+  }
+
+  // The initial history may contain only the newest page, or even only
+  // currentId. Follow parentId and fetch missing ancestors until reaching the
+  // root. This avoids depending on DOM virtualization or scroll behavior.
+  let currentId = chooseApiLeaf(history) ?? history.currentId;
+  const visited = new Set<string>();
+
+  for (let depth = 0; currentId !== null && depth < 10_000; depth += 1) {
+    if (visited.has(currentId)) {
+      console.warn(`[!] Detected a cycle in Z.ai history at message ${currentId}.`);
+      break;
+    }
+
+    visited.add(currentId);
+    let message = history.messages[currentId];
+
+    if (message === undefined || !hasApiMessageContent(message)) {
+      await fetchAndMerge([currentId]);
+      message = history.messages[currentId];
+    }
+
+    if (message === undefined) {
+      console.warn(`[!] Could not load Z.ai history message ${currentId}.`);
+      break;
+    }
+
+    const parentId = messageParentId(message);
+
+    if (parentId === null) {
+      break;
+    }
+
+    if (history.messages[parentId] === undefined) {
+      const loaded = await fetchAndMerge([parentId]);
+
+      if (!loaded || history.messages[parentId] === undefined) {
+        console.warn(`[!] Could not load older Z.ai history before message ${currentId}.`);
+        break;
+      }
+    }
+
+    currentId = parentId;
+  }
+
+  return {
+    requestEndpoint,
+    branchComplete: isApiBranchComplete(history),
+  };
+}
+
+function contentPartToMarkdown(value: unknown, depth = 0): string {
+  if (depth > 5 || value === null || value === undefined) {
+    return "";
+  }
+
+  if (typeof value === "string") {
+    return value;
+  }
+
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => contentPartToMarkdown(item, depth + 1))
+      .filter((item) => item.trim().length > 0)
+      .join("\n\n");
+  }
+
+  const record = asRecord(value);
+
+  if (record === undefined) {
+    return "";
+  }
+
+  const type = typeof record.type === "string" ? record.type.toLowerCase() : "";
+  const text = record.text;
+
+  if (typeof text === "string") {
+    return text;
+  }
+
+  const textRecord = asRecord(text);
+  const textValue =
+    textRecord === undefined ? undefined : firstString(textRecord, ["value", "content"]);
+
+  if (textValue !== undefined) {
+    return textValue;
+  }
+
+  if (type.includes("image")) {
+    const image = asRecord(record.image_url ?? record.imageUrl);
+    const url =
+      (typeof record.url === "string" ? record.url : undefined) ??
+      (image === undefined ? undefined : firstString(image, ["url"])) ??
+      "";
+
+    return url.length > 0 ? `![](${url})` : "";
+  }
+
+  for (const key of [
+    "content",
+    "value",
+    "message",
+    "output",
+    "parts",
+    "body",
+    "markdown",
+  ] as const) {
+    if (record[key] !== undefined && record[key] !== value) {
+      const nested = contentPartToMarkdown(record[key], depth + 1);
+
+      if (nested.trim().length > 0) {
+        return nested;
+      }
+    }
+  }
+
+  return "";
+}
+
+function apiAttachmentMarkdown(message: Record<string, unknown>): string[] {
+  if (!Array.isArray(message.files)) {
+    return [];
+  }
+
+  const output: string[] = [];
+  const seen = new Set<string>();
+
+  for (const value of message.files) {
+    const file = asRecord(value);
+
+    if (file === undefined) {
+      continue;
+    }
+
+    const nestedFile = asRecord(file.file);
+    const meta = nestedFile === undefined ? undefined : asRecord(nestedFile.meta);
+    const name =
+      firstString(file, ["name", "filename", "id"]) ??
+      (nestedFile === undefined
+        ? undefined
+        : firstString(nestedFile, ["filename", "name", "id"])) ??
+      (meta === undefined ? undefined : firstString(meta, ["name", "filename"])) ??
+      "attachment";
+    const url =
+      firstString(file, ["url", "src", "cdn_url"]) ??
+      (meta === undefined ? undefined : firstString(meta, ["cdn_url", "url"])) ??
+      "";
+    const mediaType =
+      firstString(file, ["media", "type", "content_type"]) ??
+      (meta === undefined ? undefined : firstString(meta, ["content_type", "type"])) ??
+      "";
+    const key = `${name}\u0000${url}`;
+
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+
+    const isImage =
+      /image/i.test(mediaType) || /\.(?:png|jpe?g|gif|webp|avif|svg)(?:$|[?#])/i.test(url || name);
+
+    if (url.length > 0) {
+      output.push(isImage ? `![${name}](${url})` : `[${name}](${url})`);
+    } else {
+      output.push(`**Attachment:** ${name}`);
+    }
+  }
+
+  return output;
+}
+
+function extractEmbeddedThinking(markdown: string): {
+  body: string;
+  thinking: string[];
+} {
+  const thinking: string[] = [];
+  let body = markdown.replace(
+    /<think(?:\s[^>]*)?>([\s\S]*?)<\/think>/gi,
+    (_match, content: string) => {
+      const cleaned = content.trim();
+
+      if (cleaned.length > 0) {
+        thinking.push(cleaned);
+      }
+
+      return "";
+    },
+  );
+
+  body = body.replace(
+    /<details\b[^>]*(?:type=["']?(?:reasoning|thinking)["']?|class=["'][^"']*(?:reasoning|thinking)[^"']*["'])[^>]*>([\s\S]*?)<\/details>/gi,
+    (_match, content: string) => {
+      const cleaned = content
+        .replace(/<summary\b[^>]*>[\s\S]*?<\/summary>/i, "")
+        .replace(/<[^>]+>/g, "")
+        .trim();
+
+      if (cleaned.length > 0) {
+        thinking.push(cleaned);
+      }
+
+      return "";
+    },
+  );
+
+  return { body, thinking };
+}
+
+function formatThinkingBlock(markdown: string): string {
+  const lines = markdown.replace(/\r\n?/g, "\n").trim().split("\n");
+  return [
+    "> **Thinking**",
+    ">",
+    ...lines.map((line) => (line.length > 0 ? `> ${line}` : ">")),
+  ].join("\n");
+}
+
+function convertApiHistory(
+  history: ApiHistory,
+  converter: TurndownService,
+  includeThinking: boolean,
+): Message[] {
+  const output: Message[] = [];
+
+  for (const id of activeApiBranchIds(history)) {
+    const message = history.messages[id];
+
+    if (message === undefined) {
+      continue;
+    }
+
+    const rawRole = firstString(message, ["role", "author", "sender"])?.toLowerCase();
+    const role: Role | undefined =
+      rawRole === "user" || rawRole === "human"
+        ? "User"
+        : rawRole === "assistant" || rawRole === "model" || rawRole === "zai" || rawRole === "z.ai"
+          ? "Z.ai"
+          : undefined;
+
+    if (role === undefined) {
+      continue;
+    }
+
+    let body = contentPartToMarkdown(message.content);
+    const embedded = extractEmbeddedThinking(body);
+    body = embedded.body;
+
+    const explicitThinking = contentPartToMarkdown(
+      message.reasoning_content ??
+        message.reasoningContent ??
+        message.reasoning ??
+        message.thinking,
+    );
+    const thinking = [...embedded.thinking, explicitThinking]
+      .map((value) => value.trim())
+      .filter((value) => value.length > 0);
+
+    const attachments = apiAttachmentMarkdown(message);
+    const sections = [
+      ...(includeThinking ? thinking.map(formatThinkingBlock) : []),
+      body,
+      ...attachments.filter((attachment) => !body.includes(attachment)),
+    ].filter((section) => section.trim().length > 0);
+
+    let markdown = sections.join("\n\n");
+
+    if (/<(?:p|div|pre|table|h[1-6]|ul|ol|blockquote)\b/i.test(markdown)) {
+      markdown = converter.turndown(markdown);
+    }
+
+    markdown = cleanMarkdown(markdown, role);
+
+    if (markdown.length === 0) {
+      continue;
+    }
+
+    const previous = output.at(-1);
+
+    if (previous !== undefined && previous.role === role) {
+      previous.content = `${previous.content}\n\n${markdown}`;
+    } else {
+      output.push({ role, content: markdown });
+    }
+  }
+
+  return output;
+}
+
+async function tryExtractConversationFromApi(
+  page: Page,
+  requestedUrl: URL,
+  includeThinking: boolean,
+): Promise<ApiScrapeResult | null> {
+  const match = requestedUrl.pathname.match(/^\/(c|s)\/([^/]+)/i);
+
+  if (match?.[1] === undefined || match[2] === undefined) {
+    return null;
+  }
+
+  const kind = match[1].toLowerCase();
+  const conversationId = match[2];
+  const endpoint =
+    kind === "s"
+      ? `/api/v1/chats/share/${encodeURIComponent(conversationId)}`
+      : `/api/v1/chats/${encodeURIComponent(conversationId)}`;
+
+  console.log(`[-] Loading complete conversation history from ${endpoint}`);
+
+  const response = await fetchPageJson(page, endpoint);
+
+  if (!response.ok) {
+    console.warn(
+      `[!] Z.ai history API returned ${response.status || "a network error"}${
+        response.statusText ? ` ${response.statusText}` : ""
+      }; falling back to rendered-DOM extraction.${response.error ? ` ${response.error}` : ""}`,
+    );
+    return null;
+  }
+
+  const conversation = parseApiConversation(response.data);
+
+  if (conversation === undefined) {
+    console.warn(
+      "[!] Z.ai history API returned no recognizable message history; falling back to the DOM.",
+    );
+    return null;
+  }
+
+  const enrichment = await enrichApiMessages(page, conversationId, conversation.history);
+
+  const converter = configureTurndown();
+  const branchIds = activeApiBranchIds(conversation.history);
+  const messages = convertApiHistory(conversation.history, converter, includeThinking);
+
+  if (messages.length === 0) {
+    console.warn(
+      "[!] Z.ai history API contained no convertible active-branch messages; falling back to the DOM.",
+    );
+    return null;
+  }
+
+  const pageMetadata = await extractMetadata(page);
+  const historyMessageCount = Object.keys(conversation.history.messages).length;
+
+  return {
+    metadata: {
+      title: cleanTitle(conversation.title ?? pageMetadata.title),
+      url: pageMetadata.url || requestedUrl.href,
+    },
+    messages,
+    endpoint: enrichment.requestEndpoint ?? endpoint,
+    historyMessageCount,
+    branchMessageCount: branchIds.length,
+    branchComplete: enrichment.branchComplete,
+  };
+}
+
 async function markBestScrollContainer(page: Page): Promise<boolean> {
   return page.evaluate(
     ({ knownSelectors, messageSelector }) => {
       const marker = "data-zai-scraper-scroll-root";
-      document.querySelectorAll(`[${marker}]`).forEach((element) => element.removeAttribute(marker));
+      document
+        .querySelectorAll(`[${marker}]`)
+        .forEach((element) => element.removeAttribute(marker));
 
       const candidates = new Set<HTMLElement>();
 
@@ -686,7 +1435,9 @@ async function countUsableElements(page: Page, selector: string): Promise<number
         return false;
       }
 
-      return normalize(element.innerText).length > 0 || element.querySelector("img, pre, table") !== null;
+      return (
+        normalize(element.innerText).length > 0 || element.querySelector("img, pre, table") !== null
+      );
     });
 
     return candidates.filter(
@@ -847,12 +1598,16 @@ async function extractRawTurns(
           current = current.parentElement;
         }
 
-        if (element.querySelector(".chat-user, [data-role='user'], [data-message-author-role='user']")) {
+        if (
+          element.querySelector(".chat-user, [data-role='user'], [data-message-author-role='user']")
+        ) {
           return "User";
         }
 
         if (
-          element.matches(".markdown-prose:not(.chat-user), .markdown-body, .prose, [data-markdown]") ||
+          element.matches(
+            ".markdown-prose:not(.chat-user), .markdown-body, .prose, [data-markdown]",
+          ) ||
           element.querySelector(
             ".markdown-prose:not(.chat-user), [data-role='assistant'], [data-message-author-role='assistant']",
           )
@@ -892,7 +1647,9 @@ async function extractRawTurns(
           }
 
           const display = katex.closest(".katex-display") !== null;
-          katex.replaceWith(document.createTextNode(display ? `\n\n$$\n${source}\n$$\n\n` : `$${source}$`));
+          katex.replaceWith(
+            document.createTextNode(display ? `\n\n$$\n${source}\n$$\n\n` : `$${source}$`),
+          );
         }
       };
 
@@ -900,7 +1657,8 @@ async function extractRawTurns(
         root.querySelectorAll("button").forEach((button) => {
           const text = normalize(button.textContent ?? "");
           const looksLikeAttachment =
-            button.querySelector("img[data-cy='image'], img.not-prose, img.object-cover") !== null ||
+            button.querySelector("img[data-cy='image'], img.not-prose, img.object-cover") !==
+              null ||
             (/\.[A-Za-z0-9]{1,10}\b/.test(text) && /\b(?:B|KB|MB|GB|TB)\b/i.test(text));
 
           if (!looksLikeAttachment) {
@@ -915,9 +1673,9 @@ async function extractRawTurns(
       };
 
       const normalizeThinking = (root: HTMLElement): void => {
-        const thinkingNodes = Array.from(root.querySelectorAll<HTMLElement>(thinkingSelector)).filter(
-          (element) => element.parentElement?.closest(thinkingSelector) === null,
-        );
+        const thinkingNodes = Array.from(
+          root.querySelectorAll<HTMLElement>(thinkingSelector),
+        ).filter((element) => element.parentElement?.closest(thinkingSelector) === null);
 
         for (const thinking of thinkingNodes) {
           if (!options.includeThinking) {
@@ -956,7 +1714,8 @@ async function extractRawTurns(
 
         return (
           isVisible(element) &&
-          (normalize(element.innerText).length > 0 || element.querySelector("img, pre, table") !== null)
+          (normalize(element.innerText).length > 0 ||
+            element.querySelector("img, pre, table") !== null)
         );
       });
 
@@ -1095,7 +1854,10 @@ async function createContext(options: CliOptions): Promise<ContextHandle> {
   } as const;
 
   if (options.profileDir !== undefined) {
-    const context = await chromium.launchPersistentContext(resolve(options.profileDir), launchOptions);
+    const context = await chromium.launchPersistentContext(
+      resolve(options.profileDir),
+      launchOptions,
+    );
     return {
       context,
       close: async () => context.close(),
@@ -1109,9 +1871,7 @@ async function createContext(options: CliOptions): Promise<ContextHandle> {
   const context = await browser.newContext({
     locale: launchOptions.locale,
     extraHTTPHeaders: launchOptions.extraHTTPHeaders,
-    ...(options.storageState !== undefined
-      ? { storageState: resolve(options.storageState) }
-      : {}),
+    ...(options.storageState !== undefined ? { storageState: resolve(options.storageState) } : {}),
   });
 
   return {
@@ -1163,33 +1923,63 @@ async function scrapeConversation(options: CliOptions): Promise<ScrapeResult> {
 
   try {
     await navigate(page, options.url, options.timeoutMs);
-    await waitForConversationContent(page, selectors, options.url, options.timeoutMs);
-    await preloadConversationHistory(page);
+
+    const apiResult =
+      options.selector === undefined
+        ? await tryExtractConversationFromApi(page, options.url, options.includeThinking)
+        : null;
+
+    if (apiResult === null) {
+      await waitForConversationContent(page, selectors, options.url, options.timeoutMs);
+    }
+
+    let metadata: Metadata;
+    let messages: Message[];
+    let selector: string;
+
+    if (apiResult !== null) {
+      metadata = apiResult.metadata;
+      messages = apiResult.messages;
+      selector = apiResult.endpoint;
+
+      console.log(`[-] Detected title: ${metadata.title}`);
+      console.log(
+        `[-] Loaded ${messages.length} exported messages from ${apiResult.branchMessageCount} active-branch records (${apiResult.historyMessageCount} API records cached)`,
+      );
+
+      if (!apiResult.branchComplete) {
+        console.warn(
+          "[!] The API branch did not reach a root message; the export may still be incomplete.",
+        );
+      }
+    } else {
+      await preloadConversationHistory(page);
+
+      selector = await chooseMessageSelector(page, selectors, options.selector !== undefined);
+      console.log(`[-] Extracting turns with selector: ${selector}`);
+
+      const [domMetadata, rawTurns] = await Promise.all([
+        extractMetadata(page),
+        extractRawTurns(page, selector, options.includeThinking),
+      ]);
+
+      metadata = domMetadata;
+      console.log(`[-] Detected title: ${metadata.title}`);
+      console.log(`[-] Found ${rawTurns.length} raw turn blocks`);
+
+      messages = convertTurns(rawTurns, configureTurndown());
+    }
 
     if (options.debugHtml !== undefined) {
       await saveDebugHtml(page, options.debugHtml);
     }
-
-    const selector = await chooseMessageSelector(page, selectors, options.selector !== undefined);
-
-    console.log(`[-] Extracting turns with selector: ${selector}`);
-
-    const [metadata, rawTurns] = await Promise.all([
-      extractMetadata(page),
-      extractRawTurns(page, selector, options.includeThinking),
-    ]);
-
-    console.log(`[-] Detected title: ${metadata.title}`);
-    console.log(`[-] Found ${rawTurns.length} raw turn blocks`);
-
-    const messages = convertTurns(rawTurns, configureTurndown());
 
     if (messages.length === 0) {
       throw new ExtractionError(
         [
           "The page loaded, but no messages could be converted.",
           "Use --debug-html to inspect the rendered DOM or",
-          "--selector to provide a message-root selector.",
+          "--selector to force a message-root selector.",
         ].join(" "),
       );
     }

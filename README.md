@@ -6,11 +6,14 @@ It supports both normal conversation URLs (`/c/<id>`) and shared conversation UR
 
 ## Features
 
-- Z.ai-specific selectors with broad structural fallbacks
+- API-first extraction of complete Z.ai message history
+- Active-branch reconstruction from Z.ai message parent/child links
+- Direct hydration of missing ancestors when only recent messages are initially exposed
+- Z.ai-specific DOM selectors with broad structural fallbacks
 - Normal (`/c/<id>`) and shared (`/s/<id>`) conversations
 - Persistent Chromium profiles for authenticated private chats
 - Optional Playwright storage-state loading and saving
-- Internal scroll-container discovery and bounded history preloading
+- DOM scrolling and bounded history preloading only as a fallback
 - Role inference from message IDs, attributes, classes, and content structure
 - Hidden reasoning/thinking blocks excluded by default
 - Atomic file writes (temporary file + rename)
@@ -60,19 +63,21 @@ Do not point `--profile-dir` at your normal Chromium/Chrome profile. Use a scrap
 
 ## Options
 
-| Flag | Description |
-|------|-------------|
-| `-o, --output <path>` | Output Markdown file |
-| `--selector <css>` | Override automatic message-root detection |
-| `--timeout <ms>` | Navigation/content timeout (default: `60000`) |
-| `--debug-html <path>` | Save the rendered page HTML |
-| `--profile-dir <path>` | Use a persistent Chromium profile |
-| `--storage-state <path>` | Load Playwright storage state |
-| `--save-storage-state <path>` | Save storage state after scraping |
-| `--include-thinking` | Include Z.ai thinking/reasoning blocks |
-| `--headed` | Show the Chromium window |
+| Flag                          | Description                                   |
+| ----------------------------- | --------------------------------------------- |
+| `-o, --output <path>`         | Output Markdown file                          |
+| `--selector <css>`            | Override automatic message-root detection     |
+| `--timeout <ms>`              | Navigation/content timeout (default: `60000`) |
+| `--debug-html <path>`         | Save the rendered page HTML                   |
+| `--profile-dir <path>`        | Use a persistent Chromium profile             |
+| `--storage-state <path>`      | Load Playwright storage state                 |
+| `--save-storage-state <path>` | Save storage state after scraping             |
+| `--include-thinking`          | Include Z.ai thinking/reasoning blocks        |
+| `--headed`                    | Show the Chromium window                      |
 
 `--profile-dir` and `--storage-state` are mutually exclusive because persistent Playwright contexts cannot be initialized from a storage-state file.
+
+By default, the scraper reads the complete conversation from Z.ai's own history endpoints. Passing `--selector` explicitly disables the API path and forces rendered-DOM extraction, which is useful only for debugging or adapting to an API change.
 
 ## Examples
 
@@ -117,9 +122,11 @@ node dist/zai-to-markdown.js "https://chat.z.ai/s/<share-id>"
 ---
 
 ## User
+
 [User message]
 
 ## Z.ai
+
 [Assistant response]
 ```
 
@@ -127,6 +134,16 @@ node dist/zai-to-markdown.js "https://chat.z.ai/s/<share-id>"
 
 The scraper never asks for, stores, or handles your password directly. Authentication is performed by Z.ai inside Chromium. A persistent profile or storage-state file can contain live session credentials, so keep it private and do not commit it.
 
-## DOM Maintenance
+## Extraction Strategy
 
-Z.ai is a private web application and its DOM can change without notice. The default selector chain prioritizes current message-root IDs and Z.ai classes, then falls back to semantic role attributes and broader content selectors. When extraction fails, use `--debug-html` and, if needed, `--selector` to inspect and override message detection.
+The scraper first requests the conversation history used by Z.ai itself:
+
+- Shared conversations: `/api/v1/chats/share/<share-id>`
+- Private conversations: `/api/v1/chats/<conversation-id>`
+- Missing message bodies, when necessary: `/api/v1/chats/<id>/messages/batch`
+
+Z.ai stores messages as a tree. The scraper starts at `currentId`, follows each message's `parentId`, and requests missing ancestors from the batch endpoint until it reaches the root. It therefore does not require older messages to remain mounted in the rendered DOM—or even to be present in the initial history response.
+
+A successful API-backed run reports the number of exported messages, active-branch records, and cached API records. The old `No internal scroll container was identified` warning should appear only when the API path failed and the scraper had to use its less reliable DOM fallback.
+
+If those endpoints fail or their schema changes, the scraper falls back to rendered-DOM extraction and bounded scrolling. Z.ai is a private web application, so both its API and DOM can change without notice. Use `--debug-html` to capture the rendered page, or pass `--selector` to force and customize the DOM path.
