@@ -6,15 +6,15 @@ It supports both normal conversation URLs (`/c/<id>`) and shared conversation UR
 
 ## Features
 
-- API-first extraction of complete Z.ai message history
+- Captures the successful history responses loaded by Z.ai itself
 - Role-aware decoding of user `content` and assistant `content_blocks`
 - Active-branch reconstruction from Z.ai message parent/child links
-- Direct hydration of missing ancestors when only recent messages are initially exposed
+- Incremental network and DOM collection for virtualized older messages
 - Z.ai-specific DOM selectors with broad structural fallbacks
 - Normal (`/c/<id>`) and shared (`/s/<id>`) conversations
 - Persistent Chromium profiles for authenticated private chats
 - Optional Playwright storage-state loading and saving
-- DOM scrolling and bounded history preloading only as a fallback
+- Scrolls every real scroll surface instead of guessing one container
 - Role inference from message IDs, attributes, classes, and content structure
 - Hidden reasoning/thinking blocks excluded by default
 - Atomic file writes (temporary file + rename)
@@ -78,7 +78,7 @@ Do not point `--profile-dir` at your normal Chromium/Chrome profile. Use a scrap
 
 `--profile-dir` and `--storage-state` are mutually exclusive because persistent Playwright contexts cannot be initialized from a storage-state file.
 
-By default, the scraper reads the complete conversation from Z.ai's own history endpoints. Passing `--selector` explicitly disables the API path and forces rendered-DOM extraction, which is useful only for debugging or adapting to an API change.
+By default, the scraper listens to the history requests made by the Z.ai page itself and consumes their successful responses. This matters because directly repeating the nominal shared-history endpoint may return `403 Forbidden` even while the page is able to render the conversation. Passing `--selector` explicitly disables network-history parsing and forces incremental rendered-DOM extraction.
 
 ## Examples
 
@@ -118,7 +118,7 @@ node dist/zai-to-markdown.js "https://chat.z.ai/s/<share-id>"
 bun test
 ```
 
-The regression suite covers assistant replies stored exclusively in `content_blocks`, reasoning filtering, nested role metadata, and the fallback `content` representation.
+The regression suite covers assistant replies stored exclusively in `content_blocks`, reasoning filtering, captured metadata/batch merging, nested role metadata, virtualized-window ordering, and the fallback `content` representation.
 
 ## Output Format
 
@@ -145,16 +145,14 @@ The scraper never asks for, stores, or handles your password directly. Authentic
 
 ## Extraction Strategy
 
-The scraper first requests the conversation history used by Z.ai itself:
+The scraper installs its Playwright response listener **before navigation**. It then consumes successful conversation and `messages/batch` responses made by the Z.ai application itself, rather than assuming that a separately issued request to `/api/v1/chats/share/<id>` will be authorized.
 
-- Shared conversations: `/api/v1/chats/share/<share-id>`
-- Private conversations: `/api/v1/chats/<conversation-id>`
-- Missing message bodies, when necessary: `/api/v1/chats/<id>/messages/batch`
+Z.ai stores messages as a parent-linked tree. The scraper merges every captured batch, begins at `currentId` when available, and follows `parentId` to reconstruct the active branch. While that branch is incomplete, it scrolls every scrollable page element to the top and collects newly loaded response batches. This follows the application's own lazy-loading path without requiring the scraper to know private request headers.
 
-Z.ai stores messages as a tree. The scraper starts at `currentId`, follows each message's `parentId`, and requests missing ancestors from the batch endpoint until it reaches the root. It therefore does not require older messages to remain mounted in the rendered DOM—or even to be present in the initial history response.
+Message bodies are role-specific: user prompts are read from `content`, while assistant replies are decoded primarily from `content_blocks` with `content` retained as a fallback. Reasoning blocks are separated from answer blocks and included only with `--include-thinking`.
 
-Message bodies are role-specific: user prompts are read from `content`, while assistant replies are decoded primarily from `content_blocks` (with `content` retained as a fallback). Reasoning blocks are separated from answer blocks and included only with `--include-thinking`.
+If no recognizable history response is available, the DOM fallback no longer preloads and then reads only the final virtualized window. Instead, it snapshots each rendered window while moving upward, deduplicates turns by Z.ai message ID, and prepends newly discovered older turns. This is less authoritative than the response-backed path but does not silently discard windows that Z.ai unmounts.
 
-A successful API-backed run reports the number of exported messages, active-branch records, and cached API records. The old `No internal scroll container was identified` warning should appear only when the API path failed and the scraper had to use its less reliable DOM fallback.
+A successful response-backed run reports the number of exported messages, active-branch records, and cached API records. A fallback run reports the growing count of distinct rendered turn blocks. If neither count grows while scrolling, use `--headed --debug-html page.html` to inspect a fresh Z.ai DOM/network change.
 
-If those endpoints fail or their schema changes, the scraper falls back to rendered-DOM extraction and bounded scrolling. Z.ai is a private web application, so both its API and DOM can change without notice. Use `--debug-html` to capture the rendered page, or pass `--selector` to force and customize the DOM path.
+Z.ai is a private web application, so both its endpoints and rendered structure may change without notice.

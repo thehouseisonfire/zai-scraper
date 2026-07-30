@@ -17,6 +17,7 @@ interface Metadata {
 }
 
 interface RawTurn {
+  key: string;
   role: Role | null;
   html: string;
 }
@@ -82,6 +83,20 @@ interface ApiEnrichmentResult {
   branchComplete: boolean;
 }
 
+interface CapturedHistoryResponse {
+  url: string;
+  method: string;
+  status: number;
+  body: string;
+  data: unknown;
+}
+
+interface HistoryCapture {
+  readonly entries: CapturedHistoryResponse[];
+  waitForIdle(): Promise<void>;
+  dispose(): void;
+}
+
 const DEFAULT_TITLE = "Z.ai Conversation";
 const DEFAULT_TIMEOUT_MS = 60_000;
 const ZAI_HOSTNAMES = new Set(["chat.z.ai", "www.chat.z.ai"]);
@@ -118,13 +133,6 @@ const CONVERSATION_CONTENT_SELECTOR = [
   '#chat-container [data-role="assistant"]',
 ].join(", ");
 
-const SCROLL_CONTAINER_SELECTORS = [
-  "#chat-container #messages-container",
-  "#chat-container .flex.overflow-y-scroll.flex-col.w-full.h-full",
-  "#chat-container .scrollbar-none.flex.flex-col",
-  "#chat-container [data-pane-id] .overflow-y-scroll",
-  "#chat-container [data-pane-id] .scrollbar-none",
-] as const;
 
 const THINKING_SELECTOR = ".thinking-chain-container, .thinking-block";
 
@@ -560,6 +568,204 @@ function firstString(record: Record<string, unknown>, keys: readonly string[]): 
   }
 
   return undefined;
+}
+
+function createHistoryCapture(page: Page): HistoryCapture {
+  const entries: CapturedHistoryResponse[] = [];
+  const pending = new Set<Promise<void>>();
+
+  const onResponse = (response: import("playwright").Response): void => {
+    const request = response.request();
+    let url: URL;
+
+    try {
+      url = new URL(response.url());
+    } catch {
+      return;
+    }
+
+    const hostname = url.hostname.toLowerCase();
+
+    if (hostname !== "z.ai" && !hostname.endsWith(".z.ai")) {
+      return;
+    }
+
+    const path = url.pathname.toLowerCase();
+    const relevant =
+      path.includes("/api/") &&
+      /(?:chat|conversation|history|message|share|batch)/i.test(path);
+
+    if (!relevant || response.status() < 200 || response.status() >= 300) {
+      return;
+    }
+
+    const task = (async () => {
+      try {
+        const body = await response.text();
+
+        if (body.trim().length === 0) {
+          return;
+        }
+
+        let data: unknown = body;
+
+        try {
+          data = JSON.parse(body) as unknown;
+        } catch {
+          // Some deployments label JSON as text/plain. Keep the raw body for
+          // diagnostics, but only JSON payloads participate in API extraction.
+        }
+
+        entries.push({
+          url: response.url(),
+          method: request.method(),
+          status: response.status(),
+          body,
+          data,
+        });
+      } catch {
+        // Response bodies can become unavailable after redirects or page close.
+      }
+    })();
+
+    pending.add(task);
+    void task.finally(() => pending.delete(task));
+  };
+
+  page.on("response", onResponse);
+
+  return {
+    entries,
+    async waitForIdle(): Promise<void> {
+      while (pending.size > 0) {
+        await Promise.allSettled([...pending]);
+      }
+    },
+    dispose(): void {
+      page.off("response", onResponse);
+    },
+  };
+}
+
+function mergeCapturedBatchResponses(
+  history: ApiHistory,
+  entries: readonly CapturedHistoryResponse[],
+): number {
+  const before = Object.keys(history.messages).length;
+
+  for (const entry of entries) {
+    let pathname = "";
+
+    try {
+      pathname = new URL(entry.url).pathname;
+    } catch {
+      continue;
+    }
+
+    if (!/\/messages\/batch(?:\/|$)/i.test(pathname)) {
+      continue;
+    }
+
+    const payload = asRecord(entry.data);
+    const messages = normalizeApiMessageMap(payload?.data ?? entry.data);
+    mergeApiMessages(history, messages);
+  }
+
+  return Object.keys(history.messages).length - before;
+}
+
+function conversationFromCapturedResponses(
+  entries: readonly CapturedHistoryResponse[],
+): { conversation: ApiConversation; endpoint: string } | null {
+  for (const entry of [...entries].reverse()) {
+    const conversation = parseApiConversation(entry.data);
+
+    if (conversation !== undefined) {
+      mergeCapturedBatchResponses(conversation.history, entries);
+      return { conversation, endpoint: entry.url };
+    }
+  }
+
+  const history: ApiHistory = { currentId: null, messages: {} };
+  mergeCapturedBatchResponses(history, entries);
+
+  if (Object.keys(history.messages).length === 0) {
+    return null;
+  }
+
+  return {
+    conversation: { history },
+    endpoint: entries.find((entry) => /\/messages\/batch(?:\/|$)/i.test(entry.url))?.url ??
+      "captured Z.ai history responses",
+  };
+}
+
+async function scrollEveryHistorySurfaceToTop(page: Page): Promise<boolean> {
+  const scrolled = await page
+    .evaluate(() => {
+      const elements = [document.scrollingElement, ...Array.from(document.querySelectorAll("*"))];
+      let foundScrollable = false;
+
+      for (const element of elements) {
+        if (!(element instanceof HTMLElement)) {
+          continue;
+        }
+
+        if (element.scrollHeight <= element.clientHeight + 40) {
+          continue;
+        }
+
+        foundScrollable = true;
+        element.scrollTo({ top: 0, behavior: "auto" });
+        element.dispatchEvent(new Event("scroll", { bubbles: true }));
+      }
+
+      window.scrollTo({ top: 0, behavior: "auto" });
+      window.dispatchEvent(new Event("scroll"));
+      return foundScrollable;
+    })
+    .catch(() => false);
+
+  await page.locator("#chat-container").hover().catch(() => undefined);
+  await page.mouse.wheel(0, -100_000).catch(() => undefined);
+  await page.keyboard.press("Home").catch(() => undefined);
+  return scrolled;
+}
+
+async function hydrateHistoryFromCapturedTraffic(
+  page: Page,
+  capture: HistoryCapture,
+  history: ApiHistory,
+  timeoutMs: number,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  let stablePasses = 0;
+  let previousEntryCount = -1;
+  let previousMessageCount = -1;
+
+  while (!isApiBranchComplete(history) && Date.now() < deadline && stablePasses < 4) {
+    await capture.waitForIdle();
+    mergeCapturedBatchResponses(history, capture.entries);
+
+    const entryCount = capture.entries.length;
+    const messageCount = Object.keys(history.messages).length;
+
+    if (entryCount === previousEntryCount && messageCount === previousMessageCount) {
+      stablePasses += 1;
+    } else {
+      stablePasses = 0;
+    }
+
+    previousEntryCount = entryCount;
+    previousMessageCount = messageCount;
+
+    await scrollEveryHistorySurfaceToTop(page);
+    await page.waitForTimeout(650);
+  }
+
+  await capture.waitForIdle();
+  mergeCapturedBatchResponses(history, capture.entries);
+  return isApiBranchComplete(history);
 }
 
 async function fetchPageJson(
@@ -1331,6 +1537,8 @@ async function tryExtractConversationFromApi(
   page: Page,
   requestedUrl: URL,
   includeThinking: boolean,
+  capture: HistoryCapture,
+  timeoutMs: number,
 ): Promise<ApiScrapeResult | null> {
   const match = requestedUrl.pathname.match(/^\/(c|s)\/([^/]+)/i);
 
@@ -1345,29 +1553,49 @@ async function tryExtractConversationFromApi(
       ? `/api/v1/chats/share/${encodeURIComponent(conversationId)}`
       : `/api/v1/chats/${encodeURIComponent(conversationId)}`;
 
-  console.log(`[-] Loading complete conversation history from ${endpoint}`);
+  console.log("[-] Inspecting history responses loaded by the Z.ai page");
 
-  const response = await fetchPageJson(page, endpoint);
+  await page
+    .locator(CONVERSATION_CONTENT_SELECTOR)
+    .first()
+    .waitFor({ state: "attached", timeout: Math.min(timeoutMs, 10_000) })
+    .catch(() => undefined);
+  await page.waitForTimeout(150);
+  await capture.waitForIdle();
 
-  if (!response.ok) {
+  let captured = conversationFromCapturedResponses(capture.entries);
+  let directEndpointStatus: PageJsonResponse | null = null;
+
+  if (captured === null) {
+    console.log(`[-] No usable captured history yet; trying ${endpoint}`);
+    directEndpointStatus = await fetchPageJson(page, endpoint);
+
+    if (directEndpointStatus.ok) {
+      const conversation = parseApiConversation(directEndpointStatus.data);
+      if (conversation !== undefined) {
+        captured = { conversation, endpoint };
+      }
+    }
+  }
+
+  if (captured === null) {
     console.warn(
-      `[!] Z.ai history API returned ${response.status || "a network error"}${
-        response.statusText ? ` ${response.statusText}` : ""
-      }; falling back to rendered-DOM extraction.${response.error ? ` ${response.error}` : ""}`,
+      `[!] No usable Z.ai history response was captured${
+        directEndpointStatus === null
+          ? ""
+          : `; direct history request returned ${directEndpointStatus.status || "a network error"}${
+              directEndpointStatus.statusText ? ` ${directEndpointStatus.statusText}` : ""
+            }`
+      }. Falling back to incremental rendered-DOM collection.`,
     );
     return null;
   }
 
-  const conversation = parseApiConversation(response.data);
-
-  if (conversation === undefined) {
-    console.warn(
-      "[!] Z.ai history API returned no recognizable message history; falling back to the DOM.",
-    );
-    return null;
-  }
-
+  const { conversation } = captured;
+  console.log(`[-] Using ${capture.entries.length} successful history response(s) loaded by the page`);
+  await hydrateHistoryFromCapturedTraffic(page, capture, conversation.history, timeoutMs);
   const enrichment = await enrichApiMessages(page, conversationId, conversation.history);
+  mergeCapturedBatchResponses(conversation.history, capture.entries);
 
   const converter = configureTurndown();
   const branchIds = activeApiBranchIds(conversation.history);
@@ -1398,163 +1626,46 @@ async function tryExtractConversationFromApi(
       url: pageMetadata.url || requestedUrl.href,
     },
     messages,
-    endpoint: enrichment.requestEndpoint ?? endpoint,
+    endpoint: enrichment.requestEndpoint ?? captured.endpoint,
     historyMessageCount,
     branchMessageCount: branchIds.length,
     branchComplete: enrichment.branchComplete,
   };
 }
 
-async function markBestScrollContainer(page: Page): Promise<boolean> {
-  return page.evaluate(
-    ({ knownSelectors, messageSelector }) => {
-      const marker = "data-zai-scraper-scroll-root";
-      document
-        .querySelectorAll(`[${marker}]`)
-        .forEach((element) => element.removeAttribute(marker));
-
-      const candidates = new Set<HTMLElement>();
-
-      for (const selector of knownSelectors) {
-        document.querySelectorAll(selector).forEach((element) => {
-          if (element instanceof HTMLElement) {
-            candidates.add(element);
-          }
-        });
-      }
-
-      document.querySelectorAll(messageSelector).forEach((message) => {
-        let current = message.parentElement;
-        let depth = 0;
-
-        while (current !== null && current !== document.body && depth < 10) {
-          const style = window.getComputedStyle(current);
-          if (style.overflowY === "auto" || style.overflowY === "scroll") {
-            candidates.add(current);
-          }
-          current = current.parentElement;
-          depth += 1;
-        }
-      });
-
-      const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
-      const viewportWidth = window.innerWidth || document.documentElement.clientWidth;
-
-      let best: HTMLElement | undefined;
-      let bestScore = Number.NEGATIVE_INFINITY;
-
-      for (const candidate of candidates) {
-        const style = window.getComputedStyle(candidate);
-        const rect = candidate.getBoundingClientRect();
-        const messageCount = candidate.querySelectorAll(messageSelector).length;
-
-        if (style.display === "none" || style.visibility === "hidden") continue;
-        if (candidate.clientHeight < 180 || rect.width < 300) continue;
-
-        let score = Math.min(messageCount, 100) * 200;
-        score += Math.min(candidate.scrollHeight - candidate.clientHeight, 20_000) / 10;
-
-        if (rect.height >= viewportHeight * 0.4) score += 600;
-        if (rect.width >= viewportWidth * 0.45) score += 400;
-        if (candidate.matches("#messages-container")) score += 1_000;
-        if (candidate.closest("#chat-container")) score += 500;
-        if (candidate.querySelector("#chat-input, textarea")) score -= 1_000;
-
-        if (score > bestScore) {
-          best = candidate;
-          bestScore = score;
-        }
-      }
-
-      if (best === undefined) {
-        return false;
-      }
-
-      best.setAttribute(marker, "true");
-      return true;
-    },
-    {
-      knownSelectors: SCROLL_CONTAINER_SELECTORS,
-      messageSelector: CONVERSATION_CONTENT_SELECTOR,
-    },
-  );
+function prependUnseenTurns(existing: RawTurn[], snapshot: RawTurn[]): RawTurn[] {
+  const seen = new Set(existing.map((turn) => turn.key));
+  const unseen = snapshot.filter((turn) => !seen.has(turn.key));
+  return unseen.length === 0 ? existing : [...unseen, ...existing];
 }
 
-async function preloadConversationHistory(page: Page): Promise<void> {
-  console.log("[-] Preloading conversation history");
-
-  const hasInternalScrollContainer = await markBestScrollContainer(page);
-
-  if (!hasInternalScrollContainer) {
-    console.warn("[!] No internal scroll container was identified; using the page scroll.");
-  }
-
-  let previousFingerprint = "";
+async function collectRawTurnsIncrementally(
+  page: Page,
+  selector: string,
+  includeThinking: boolean,
+  timeoutMs: number,
+): Promise<RawTurn[]> {
+  const deadline = Date.now() + timeoutMs;
+  let collected = await extractRawTurns(page, selector, includeThinking);
   let stablePasses = 0;
 
-  for (let pass = 0; pass < 40; pass += 1) {
-    const fingerprint = await page.evaluate(
-      ({ marker, messageSelector, internal }) => {
-        const root = internal
-          ? document.querySelector<HTMLElement>(`[${marker}="true"]`)
-          : document.scrollingElement;
+  while (Date.now() < deadline && stablePasses < 4) {
+    const before = collected.length;
+    await scrollEveryHistorySurfaceToTop(page);
+    await page.waitForTimeout(650);
 
-        if (root === null) {
-          return "missing";
-        }
+    const snapshot = await extractRawTurns(page, selector, includeThinking);
+    collected = prependUnseenTurns(collected, snapshot);
 
-        root.scrollTop = 0;
-
-        const messages = Array.from(document.querySelectorAll(messageSelector));
-        const first = messages[0];
-        const last = messages.at(-1);
-
-        return [
-          root.scrollHeight,
-          messages.length,
-          first?.id ?? first?.textContent?.slice(0, 80) ?? "",
-          last?.id ?? last?.textContent?.slice(0, 80) ?? "",
-        ].join("|");
-      },
-      {
-        marker: "data-zai-scraper-scroll-root",
-        messageSelector: CONVERSATION_CONTENT_SELECTOR,
-        internal: hasInternalScrollContainer,
-      },
-    );
-
-    await page.waitForTimeout(450);
-
-    if (fingerprint === previousFingerprint) {
+    if (collected.length === before) {
       stablePasses += 1;
     } else {
       stablePasses = 0;
+      console.log(`[-] Collected ${collected.length} distinct rendered turn blocks so far`);
     }
-
-    if (stablePasses >= 3) {
-      break;
-    }
-
-    previousFingerprint = fingerprint;
   }
 
-  await page.evaluate(
-    ({ marker, internal }) => {
-      const root = internal
-        ? document.querySelector<HTMLElement>(`[${marker}="true"]`)
-        : document.scrollingElement;
-
-      if (root !== null) {
-        root.scrollTop = root.scrollHeight;
-      }
-    },
-    {
-      marker: "data-zai-scraper-scroll-root",
-      internal: hasInternalScrollContainer,
-    },
-  );
-
-  await page.waitForTimeout(250);
+  return collected;
 }
 
 async function countUsableElements(page: Page, selector: string): Promise<number> {
@@ -1894,8 +2005,15 @@ async function extractRawTurns(
 
         clone.querySelectorAll("button, [role='button']").forEach((node) => node.remove());
 
+        const role = inferRole(element);
+        const closestMessage = element.closest('[id^="message-"]');
+        const explicitId =
+          element.id || (closestMessage instanceof HTMLElement ? closestMessage.id : "");
+        const textKey = normalize(element.innerText).slice(0, 500);
+
         return {
-          role: inferRole(element),
+          key: explicitId || `${role ?? "unknown"}:${textKey}`,
+          role,
           html: clone.outerHTML,
         };
       });
@@ -2058,6 +2176,7 @@ async function scrapeConversation(options: CliOptions): Promise<ScrapeResult> {
   const pages = context.pages();
   const page = pages[0] ?? (await context.newPage());
   page.setDefaultTimeout(options.timeoutMs);
+  const historyCapture = createHistoryCapture(page);
 
   const selectors = options.selector !== undefined ? [options.selector] : MESSAGE_SELECTORS;
 
@@ -2066,7 +2185,13 @@ async function scrapeConversation(options: CliOptions): Promise<ScrapeResult> {
 
     const apiResult =
       options.selector === undefined
-        ? await tryExtractConversationFromApi(page, options.url, options.includeThinking)
+        ? await tryExtractConversationFromApi(
+            page,
+            options.url,
+            options.includeThinking,
+            historyCapture,
+            options.timeoutMs,
+          )
         : null;
 
     if (apiResult === null) {
@@ -2093,19 +2218,17 @@ async function scrapeConversation(options: CliOptions): Promise<ScrapeResult> {
         );
       }
     } else {
-      await preloadConversationHistory(page);
-
       selector = await chooseMessageSelector(page, selectors, options.selector !== undefined);
-      console.log(`[-] Extracting turns with selector: ${selector}`);
+      console.log(`[-] Collecting rendered turns incrementally with selector: ${selector}`);
 
       const [domMetadata, rawTurns] = await Promise.all([
         extractMetadata(page),
-        extractRawTurns(page, selector, options.includeThinking),
+        collectRawTurnsIncrementally(page, selector, options.includeThinking, options.timeoutMs),
       ]);
 
       metadata = domMetadata;
       console.log(`[-] Detected title: ${metadata.title}`);
-      console.log(`[-] Found ${rawTurns.length} raw turn blocks`);
+      console.log(`[-] Collected ${rawTurns.length} distinct raw turn blocks`);
 
       messages = convertTurns(rawTurns, configureTurndown());
     }
@@ -2151,6 +2274,7 @@ async function scrapeConversation(options: CliOptions): Promise<ScrapeResult> {
 
     throw error;
   } finally {
+    historyCapture.dispose();
     await handle.close();
   }
 }
@@ -2166,6 +2290,9 @@ export const __testing = {
   configureTurndown,
   convertApiHistory,
   extractApiMessageContent,
+  mergeCapturedBatchResponses,
+  conversationFromCapturedResponses,
+  prependUnseenTurns,
 };
 
 const isMainModule =

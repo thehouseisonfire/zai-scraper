@@ -108,3 +108,76 @@ describe("Z.ai API history conversion", () => {
     ]);
   });
 });
+
+describe("captured Z.ai history traffic", () => {
+  test("reconstructs history from page-loaded metadata and batch responses", () => {
+    const captured = __testing.conversationFromCapturedResponses([
+      {
+        url: "https://chat.z.ai/api/v1/chats/share/example",
+        method: "GET",
+        status: 200,
+        body: "",
+        data: {
+          title: "Captured conversation",
+          chat: {
+            history: {
+              currentId: "a1",
+              messages: {
+                u1: { id: "u1", parentId: null, role: "user" },
+                a1: { id: "a1", parentId: "u1", role: "assistant" },
+              },
+            },
+          },
+        },
+      },
+      {
+        url: "https://chat.z.ai/api/v1/chats/example/messages/batch",
+        method: "POST",
+        status: 200,
+        body: "",
+        data: {
+          data: {
+            u1: { id: "u1", parentId: null, role: "user", content: "Question" },
+            a1: {
+              id: "a1",
+              parentId: "u1",
+              role: "assistant",
+              content_blocks: [{ type: "text", text: "Answer" }],
+            },
+          },
+        },
+      },
+    ]);
+
+    expect(captured?.conversation.title).toBe("Captured conversation");
+    expect(
+      __testing.convertApiHistory(
+        captured!.conversation.history,
+        __testing.configureTurndown(),
+        false,
+      ),
+    ).toEqual([
+      { role: "User", content: "Question" },
+      { role: "Z.ai", content: "Answer" },
+    ]);
+  });
+
+  test("prepends older virtualized DOM windows without losing the latest turns", () => {
+    const latest = [
+      { key: "message-u2", role: "User" as const, html: "<div>Question 2</div>" },
+      { key: "message-a2", role: "Z.ai" as const, html: "<div>Answer 2</div>" },
+    ];
+    const older = [
+      { key: "message-u1", role: "User" as const, html: "<div>Question 1</div>" },
+      { key: "message-a1", role: "Z.ai" as const, html: "<div>Answer 1</div>" },
+      latest[0]!,
+    ];
+
+    expect(__testing.prependUnseenTurns(latest, older).map((turn) => turn.key)).toEqual([
+      "message-u1",
+      "message-a1",
+      "message-u2",
+      "message-a2",
+    ]);
+  });
+});
