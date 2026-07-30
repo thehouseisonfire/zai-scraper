@@ -7,6 +7,7 @@ It supports both normal conversation URLs (`/c/<id>`) and shared conversation UR
 ## Features
 
 - API-first extraction of complete Z.ai message history
+- Role-aware decoding of user `content` and assistant `content_blocks`
 - Active-branch reconstruction from Z.ai message parent/child links
 - Direct hydration of missing ancestors when only recent messages are initially exposed
 - Z.ai-specific DOM selectors with broad structural fallbacks
@@ -111,6 +112,14 @@ bun run build
 node dist/zai-to-markdown.js "https://chat.z.ai/s/<share-id>"
 ```
 
+## Tests
+
+```bash
+bun test
+```
+
+The regression suite covers assistant replies stored exclusively in `content_blocks`, reasoning filtering, nested role metadata, and the fallback `content` representation.
+
 ## Output Format
 
 ```markdown
@@ -143,6 +152,8 @@ The scraper first requests the conversation history used by Z.ai itself:
 - Missing message bodies, when necessary: `/api/v1/chats/<id>/messages/batch`
 
 Z.ai stores messages as a tree. The scraper starts at `currentId`, follows each message's `parentId`, and requests missing ancestors from the batch endpoint until it reaches the root. It therefore does not require older messages to remain mounted in the rendered DOM—or even to be present in the initial history response.
+
+Message bodies are role-specific: user prompts are read from `content`, while assistant replies are decoded primarily from `content_blocks` (with `content` retained as a fallback). Reasoning blocks are separated from answer blocks and included only with `--include-thinking`.
 
 A successful API-backed run reports the number of exported messages, active-branch records, and cached API records. The old `No internal scroll container was identified` warning should appear only when the API path failed and the scraper had to use its less reliable DOM fallback.
 

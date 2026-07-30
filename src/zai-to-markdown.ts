@@ -2,6 +2,7 @@
 
 import { access, mkdir, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
 import { chromium, errors as playwrightErrors, type BrowserContext, type Page } from "playwright";
@@ -795,6 +796,12 @@ function hasApiMessageContent(message: Record<string, unknown>): boolean {
     return true;
   }
 
+  for (const key of ["content_blocks", "contentBlocks", "blocks"] as const) {
+    if (Array.isArray(message[key]) && message[key].length > 0) {
+      return true;
+    }
+  }
+
   return Array.isArray(message.files) && message.files.length > 0;
 }
 
@@ -1125,6 +1132,134 @@ function formatThinkingBlock(markdown: string): string {
   ].join("\n");
 }
 
+function apiMessageRole(message: Record<string, unknown>): Role | undefined {
+  const author = asRecord(message.author);
+  const sender = asRecord(message.sender);
+  const rawRole = (
+    firstString(message, ["role", "author", "sender", "sender_role", "senderRole"]) ??
+    (author === undefined ? undefined : firstString(author, ["role", "type", "name"])) ??
+    (sender === undefined ? undefined : firstString(sender, ["role", "type", "name"]))
+  )?.toLowerCase();
+
+  if (rawRole === "user" || rawRole === "human") {
+    return "User";
+  }
+
+  if (rawRole === "assistant" || rawRole === "model" || rawRole === "zai" || rawRole === "z.ai") {
+    return "Z.ai";
+  }
+
+  return undefined;
+}
+
+function uniqueMarkdownFragments(values: readonly string[]): string[] {
+  const output: string[] = [];
+  const seen = new Set<string>();
+
+  for (const value of values) {
+    const normalized = value.trim();
+
+    if (normalized.length === 0 || seen.has(normalized)) {
+      continue;
+    }
+
+    seen.add(normalized);
+    output.push(normalized);
+  }
+
+  return output;
+}
+
+function apiAssistantContentBlocks(message: Record<string, unknown>): unknown[] {
+  for (const key of ["content_blocks", "contentBlocks", "blocks"] as const) {
+    const value = message[key];
+
+    if (Array.isArray(value) && value.length > 0) {
+      return value;
+    }
+  }
+
+  return [];
+}
+
+function extractApiMessageContent(
+  message: Record<string, unknown>,
+  role: Role,
+): { body: string; thinking: string[] } {
+  const fallbackBody = contentPartToMarkdown(message.content);
+
+  if (role === "User") {
+    return { body: fallbackBody, thinking: [] };
+  }
+
+  const bodyParts: string[] = [];
+  const thinkingParts: string[] = [];
+
+  for (const block of apiAssistantContentBlocks(message)) {
+    const record = asRecord(block);
+    const signal =
+      record === undefined
+        ? ""
+        : [
+            firstString(record, ["type", "block_type", "blockType"]),
+            firstString(record, ["phase", "stage"]),
+          ]
+            .filter((value): value is string => value !== undefined)
+            .join(" ")
+            .toLowerCase();
+    const markdown = contentPartToMarkdown(block).trim();
+
+    if (markdown.length === 0) {
+      continue;
+    }
+
+    if (/(?:reasoning|thinking|analysis|thought)/i.test(signal)) {
+      thinkingParts.push(markdown);
+      continue;
+    }
+
+    if (/(?:tool|function|search|citation|reference|attachment|file|image)/i.test(signal)) {
+      continue;
+    }
+
+    bodyParts.push(markdown);
+  }
+
+  return {
+    body: uniqueMarkdownFragments(bodyParts).join("\n\n") || fallbackBody,
+    thinking: uniqueMarkdownFragments(thinkingParts),
+  };
+}
+
+function countApiBranchRoles(history: ApiHistory): {
+  users: number;
+  assistants: number;
+  assistantsWithVisibleContent: number;
+} {
+  let users = 0;
+  let assistants = 0;
+  let assistantsWithVisibleContent = 0;
+
+  for (const id of activeApiBranchIds(history)) {
+    const message = history.messages[id];
+    const role = message === undefined ? undefined : apiMessageRole(message);
+
+    if (role === "User") {
+      users += 1;
+    } else if (role === "Z.ai" && message !== undefined) {
+      assistants += 1;
+
+      const body = extractApiMessageContent(message, role).body.trim();
+
+      if (body.length > 0 || apiAttachmentMarkdown(message).length > 0) {
+        assistantsWithVisibleContent += 1;
+      }
+    }
+  }
+
+  return { users, assistants, assistantsWithVisibleContent };
+}
+
 function convertApiHistory(
   history: ApiHistory,
   converter: TurndownService,
@@ -1139,21 +1274,15 @@ function convertApiHistory(
       continue;
     }
 
-    const rawRole = firstString(message, ["role", "author", "sender"])?.toLowerCase();
-    const role: Role | undefined =
-      rawRole === "user" || rawRole === "human"
-        ? "User"
-        : rawRole === "assistant" || rawRole === "model" || rawRole === "zai" || rawRole === "z.ai"
-          ? "Z.ai"
-          : undefined;
+    const role = apiMessageRole(message);
 
     if (role === undefined) {
       continue;
     }
 
-    let body = contentPartToMarkdown(message.content);
-    const embedded = extractEmbeddedThinking(body);
-    body = embedded.body;
+    const extracted = extractApiMessageContent(message, role);
+    const embedded = extractEmbeddedThinking(extracted.body);
+    const body = embedded.body;
 
     const explicitThinking = contentPartToMarkdown(
       message.reasoning_content ??
@@ -1161,9 +1290,11 @@ function convertApiHistory(
         message.reasoning ??
         message.thinking,
     );
-    const thinking = [...embedded.thinking, explicitThinking]
-      .map((value) => value.trim())
-      .filter((value) => value.length > 0);
+    const thinking = uniqueMarkdownFragments([
+      ...extracted.thinking,
+      ...embedded.thinking,
+      explicitThinking,
+    ]);
 
     const attachments = apiAttachmentMarkdown(message);
     const sections = [
@@ -1240,11 +1371,20 @@ async function tryExtractConversationFromApi(
 
   const converter = configureTurndown();
   const branchIds = activeApiBranchIds(conversation.history);
+  const branchRoles = countApiBranchRoles(conversation.history);
   const messages = convertApiHistory(conversation.history, converter, includeThinking);
+  const exportedAssistantCount = messages.filter((message) => message.role === "Z.ai").length;
 
   if (messages.length === 0) {
     console.warn(
       "[!] Z.ai history API contained no convertible active-branch messages; falling back to the DOM.",
+    );
+    return null;
+  }
+
+  if (branchRoles.assistantsWithVisibleContent > 0 && exportedAssistantCount === 0) {
+    console.warn(
+      "[!] Z.ai history contained assistant records, but none could be decoded; falling back to rendered-DOM extraction instead of silently exporting user-only history.",
     );
     return null;
   }
@@ -2022,17 +2162,29 @@ async function main(): Promise<void> {
   console.log(`[+] Saved ${result.messageCount} messages to ${result.outputPath}`);
 }
 
-main().catch((error: unknown) => {
-  if (error instanceof UsageError) {
-    console.error(`[!] ${error.message}\n`);
-    printHelp();
-  } else {
-    console.error(`[!] ${errorMessage(error)}`);
+export const __testing = {
+  configureTurndown,
+  convertApiHistory,
+  extractApiMessageContent,
+};
 
-    if (error instanceof Error && error.cause !== undefined) {
-      console.error(`    Caused by: ${errorMessage(error.cause)}`);
+const isMainModule =
+  import.meta.main ||
+  (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url));
+
+if (isMainModule) {
+  main().catch((error: unknown) => {
+    if (error instanceof UsageError) {
+      console.error(`[!] ${error.message}\n`);
+      printHelp();
+    } else {
+      console.error(`[!] ${errorMessage(error)}`);
+
+      if (error instanceof Error && error.cause !== undefined) {
+        console.error(`    Caused by: ${errorMessage(error.cause)}`);
+      }
     }
-  }
 
-  process.exitCode = 1;
-});
+    process.exitCode = 1;
+  });
+}
