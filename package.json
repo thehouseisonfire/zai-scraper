@@ -2,6 +2,7 @@
   "name": "zai-conversation-scraper",
   "version": "1.3.0",
   "private": true,
+  "license": "MIT OR Apache-2.0",
   "type": "module",
   "scripts": {
     "scrape": "bun src/zai-to-markdown.ts",
