@@ -19,6 +19,7 @@ It supports both normal conversation URLs (`/c/<id>`) and shared conversation UR
 - Hidden reasoning/thinking blocks excluded by default
 - Atomic file writes (temporary file + rename)
 - Optional rendered HTML capture for diagnosing DOM changes
+- Graceful Ctrl+C shutdown (press again to force quit)
 - GFM output, including tables, fenced code, strikethrough, and task lists
 
 ## Prerequisites
@@ -75,6 +76,8 @@ Do not point `--profile-dir` at your normal Chromium/Chrome profile. Use a scrap
 | `--save-storage-state <path>` | Save storage state after scraping             |
 | `--include-thinking`          | Include Z.ai thinking/reasoning blocks        |
 | `--headed`                    | Show the Chromium window                      |
+| `-v, --version`               | Print the version                             |
+| `-h, --help`                  | Show usage help                               |
 
 `--profile-dir` and `--storage-state` are mutually exclusive because persistent Playwright contexts cannot be initialized from a storage-state file.
 

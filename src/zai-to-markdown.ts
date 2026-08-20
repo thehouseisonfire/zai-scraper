@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 
+import { readFileSync } from "node:fs";
 import { access, mkdir, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -101,6 +102,29 @@ const DEFAULT_TITLE = "Z.ai Conversation";
 const DEFAULT_TIMEOUT_MS = 60_000;
 const ZAI_HOSTNAMES = new Set(["chat.z.ai", "www.chat.z.ai"]);
 
+const SIGINT_EXIT_CODE = 130;
+
+let interrupted = false;
+let activeHandle: ContextHandle | undefined;
+
+function registerSigintHandler(): void {
+  const onSigint = (): void => {
+    if (interrupted) {
+      process.exit(SIGINT_EXIT_CODE);
+    }
+
+    interrupted = true;
+    console.error("\n[!] Interrupted. Closing the browser (Ctrl+C again to force quit)...");
+
+    const shutdown =
+      activeHandle !== undefined ? activeHandle.close().catch(() => undefined) : Promise.resolve();
+
+    void shutdown.then(() => process.exit(SIGINT_EXIT_CODE));
+  };
+
+  process.on("SIGINT", onSigint);
+}
+
 const TITLE_SUFFIX =
   /\s*(?:\||-|—)\s*(?:Z\.ai|ZAI|Chat Z\.ai)(?:\s*-\s*Advanced AI Chatbot[^|]*)?\s*$/i;
 const CONVERSATION_PATH = /^\/(?:c|s)\/[a-z0-9-]+(?:\/|$)/i;
@@ -132,7 +156,6 @@ const CONVERSATION_CONTENT_SELECTOR = [
   '#chat-container [data-role="user"]',
   '#chat-container [data-role="assistant"]',
 ].join(", ");
-
 
 const THINKING_SELECTOR = ".thinking-chain-container, .thinking-block";
 
@@ -184,6 +207,7 @@ Options:
       --save-storage-state <path>  Save storage state after scraping
       --include-thinking           Include Z.ai thinking/reasoning blocks
       --headed                     Show the Chromium window
+  -v, --version                   Print the version
   -h, --help                       Show this help
 
 Examples:
@@ -233,6 +257,18 @@ function parseUrl(value: string): URL {
   return url;
 }
 
+function packageVersion(): string {
+  try {
+    const packageJson = JSON.parse(
+      readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "../package.json"), "utf8"),
+    ) as { version?: unknown };
+
+    return typeof packageJson.version === "string" ? packageJson.version : "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+}
+
 function parseCliOptions(argv: string[]): CliOptions {
   const cliOptions = {
     output: {
@@ -271,6 +307,11 @@ function parseCliOptions(argv: string[]): CliOptions {
       short: "h",
       default: false,
     },
+    version: {
+      type: "boolean",
+      short: "v",
+      default: false,
+    },
   } as const;
 
   const { values, positionals } = parseArgs({
@@ -279,6 +320,11 @@ function parseCliOptions(argv: string[]): CliOptions {
     allowPositionals: true,
     strict: true,
   });
+
+  if (values.version) {
+    console.log(packageVersion());
+    process.exit(0);
+  }
 
   if (values.help) {
     printHelp();
@@ -592,8 +638,7 @@ function createHistoryCapture(page: Page): HistoryCapture {
 
     const path = url.pathname.toLowerCase();
     const relevant =
-      path.includes("/api/") &&
-      /(?:chat|conversation|history|message|share|batch)/i.test(path);
+      path.includes("/api/") && /(?:chat|conversation|history|message|share|batch)/i.test(path);
 
     if (!relevant || response.status() < 200 || response.status() >= 300) {
       return;
@@ -695,7 +740,8 @@ function conversationFromCapturedResponses(
 
   return {
     conversation: { history },
-    endpoint: entries.find((entry) => /\/messages\/batch(?:\/|$)/i.test(entry.url))?.url ??
+    endpoint:
+      entries.find((entry) => /\/messages\/batch(?:\/|$)/i.test(entry.url))?.url ??
       "captured Z.ai history responses",
   };
 }
@@ -726,7 +772,10 @@ async function scrollEveryHistorySurfaceToTop(page: Page): Promise<boolean> {
     })
     .catch(() => false);
 
-  await page.locator("#chat-container").hover().catch(() => undefined);
+  await page
+    .locator("#chat-container")
+    .hover()
+    .catch(() => undefined);
   await page.mouse.wheel(0, -100_000).catch(() => undefined);
   await page.keyboard.press("Home").catch(() => undefined);
   return scrolled;
@@ -1592,7 +1641,9 @@ async function tryExtractConversationFromApi(
   }
 
   const { conversation } = captured;
-  console.log(`[-] Using ${capture.entries.length} successful history response(s) loaded by the page`);
+  console.log(
+    `[-] Using ${capture.entries.length} successful history response(s) loaded by the page`,
+  );
   await hydrateHistoryFromCapturedTraffic(page, capture, conversation.history, timeoutMs);
   const enrichment = await enrichApiMessages(page, conversationId, conversation.history);
   mergeCapturedBatchResponses(conversation.history, capture.entries);
@@ -2162,6 +2213,8 @@ async function scrapeConversation(options: CliOptions): Promise<ScrapeResult> {
   const handle = await createContext(options);
   const { context } = handle;
 
+  activeHandle = handle;
+
   await context.route("**/*", async (route) => {
     const resourceType = route.request().resourceType();
 
@@ -2280,6 +2333,8 @@ async function scrapeConversation(options: CliOptions): Promise<ScrapeResult> {
 }
 
 async function main(): Promise<void> {
+  registerSigintHandler();
+
   const options = parseCliOptions(process.argv.slice(2));
   const result = await scrapeConversation(options);
 
@@ -2301,6 +2356,10 @@ const isMainModule =
 
 if (isMainModule) {
   main().catch((error: unknown) => {
+    if (interrupted) {
+      return;
+    }
+
     if (error instanceof UsageError) {
       console.error(`[!] ${error.message}\n`);
       printHelp();
