@@ -1,6 +1,6 @@
 {
   "name": "zai-conversation-scraper",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "description": "Scrape Z.ai conversations from chat.z.ai and save them as clean Markdown",
   "keywords": [
     "conversation",

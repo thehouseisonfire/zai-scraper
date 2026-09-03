@@ -156,7 +156,7 @@ interface HistoryCapture {
 /**
  * The current version of the package.
  */
-export const VERSION = "1.3.0";
+export const VERSION = "1.3.1";
 
 /**
  * The default title used when no conversation title is detected.
