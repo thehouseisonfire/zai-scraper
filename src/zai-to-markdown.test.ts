@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { __testing } from "./zai-to-markdown";
+import { __testing } from "./zai-to-markdown.ts";
 
 function historyWithAssistantBlocks() {
   return {

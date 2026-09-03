@@ -34,12 +34,33 @@ bun install
 bunx playwright install chromium
 ```
 
+## Install
+
+```bash
+bun add -g zai-conversation-scraper
+# or run without installing
+bunx zai-scraper "https://chat.z.ai/s/<share-id>"
+```
+
+As a library:
+
+```bash
+bunx jsr add @thehouseisonfire/zai-conversation-scraper
+```
+
+```ts
+import { scrapeConversation } from "@thehouseisonfire/zai-conversation-scraper";
+```
+
 ## Usage
+
+From a source checkout, `bun run scrape` works the same way as the
+`zai-scraper` binary used below.
 
 ### Shared conversation
 
 ```bash
-bun run scrape "https://chat.z.ai/s/<share-id>"
+zai-scraper "https://chat.z.ai/s/<share-id>"
 ```
 
 ### Private conversation
@@ -47,7 +68,7 @@ bun run scrape "https://chat.z.ai/s/<share-id>"
 Use a dedicated persistent browser profile. On the first run, launch headed, sign in in the opened Chromium window, and let the scraper continue once the conversation appears:
 
 ```bash
-bun run scrape \
+zai-scraper \
   --headed \
   --profile-dir .zai-profile \
   "https://chat.z.ai/c/<conversation-id>"
@@ -56,7 +77,7 @@ bun run scrape \
 Later runs can reuse the same profile headlessly:
 
 ```bash
-bun run scrape \
+zai-scraper \
   --profile-dir .zai-profile \
   "https://chat.z.ai/c/<conversation-id>"
 ```
@@ -87,23 +108,23 @@ By default, the scraper listens to the history requests made by the Z.ai page it
 
 ```bash
 # Shared conversation with an explicit output file
-bun run scrape -o conversation.md "https://chat.z.ai/s/<share-id>"
+zai-scraper -o conversation.md "https://chat.z.ai/s/<share-id>"
 
 # First authenticated run
-bun run scrape --headed --profile-dir .zai-profile \
+zai-scraper --headed --profile-dir .zai-profile \
   "https://chat.z.ai/c/<conversation-id>"
 
 # Capture the rendered DOM when selectors stop matching
-bun run scrape --headed --profile-dir .zai-profile \
+zai-scraper --headed --profile-dir .zai-profile \
   --debug-html zai-page.html \
   "https://chat.z.ai/c/<conversation-id>"
 
 # Force a replacement selector
-bun run scrape --selector '#chat-container [id^="message-"]' \
+zai-scraper --selector '#chat-container [id^="message-"]' \
   "https://chat.z.ai/s/<share-id>"
 
 # Include visible/embedded reasoning blocks explicitly
-bun run scrape --include-thinking "https://chat.z.ai/s/<share-id>"
+zai-scraper --include-thinking "https://chat.z.ai/s/<share-id>"
 ```
 
 ## Build
@@ -118,7 +139,7 @@ node dist/zai-to-markdown.js "https://chat.z.ai/s/<share-id>"
 ## Tests
 
 ```bash
-bun test
+bun run test
 ```
 
 The regression suite covers assistant replies stored exclusively in `content_blocks`, reasoning filtering, captured metadata/batch merging, nested role metadata, virtualized-window ordering, and the fallback `content` representation.

@@ -1,6 +1,5 @@
 #!/usr/bin/env bun
 
-import { readFileSync } from "node:fs";
 import { access, mkdir, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,25 +9,25 @@ import { chromium, errors as playwrightErrors, type BrowserContext, type Page } 
 import TurndownService from "turndown";
 import turndownPluginGfm from "turndown-plugin-gfm";
 
-type Role = "User" | "Z.ai";
+export type Role = "User" | "Z.ai";
 
-interface Metadata {
+export interface Metadata {
   title: string;
   url: string;
 }
 
-interface RawTurn {
+export interface RawTurn {
   key: string;
   role: Role | null;
   html: string;
 }
 
-interface Message {
+export interface Message {
   role: Role;
   content: string;
 }
 
-interface CliOptions {
+export interface CliOptions {
   url: URL;
   output?: string;
   debugHtml?: string;
@@ -41,7 +40,7 @@ interface CliOptions {
   includeThinking: boolean;
 }
 
-interface ScrapeResult {
+export interface ScrapeResult {
   outputPath: string;
   messageCount: number;
   selector: string;
@@ -60,12 +59,12 @@ interface PageJsonResponse {
   error: string | null;
 }
 
-interface ApiHistory {
+export interface ApiHistory {
   currentId: string | null;
   messages: Record<string, Record<string, unknown>>;
 }
 
-interface ApiConversation {
+export interface ApiConversation {
   title?: string;
   history: ApiHistory;
 }
@@ -84,7 +83,7 @@ interface ApiEnrichmentResult {
   branchComplete: boolean;
 }
 
-interface CapturedHistoryResponse {
+export interface CapturedHistoryResponse {
   url: string;
   method: string;
   status: number;
@@ -98,8 +97,11 @@ interface HistoryCapture {
   dispose(): void;
 }
 
-const DEFAULT_TITLE = "Z.ai Conversation";
-const DEFAULT_TIMEOUT_MS = 60_000;
+export const VERSION = "1.3.0";
+
+export const DEFAULT_TITLE = "Z.ai Conversation";
+
+export const DEFAULT_TIMEOUT_MS = 60_000;
 const ZAI_HOSTNAMES = new Set(["chat.z.ai", "www.chat.z.ai"]);
 
 const SIGINT_EXIT_CODE = 130;
@@ -135,7 +137,7 @@ const CONVERSATION_PATH = /^\/(?:c|s)\/[a-z0-9-]+(?:\/|$)/i;
  * The first selector producing at least two usable top-level elements wins.
  * A one-turn conversation is still accepted when no selector finds two.
  */
-const MESSAGE_SELECTORS = [
+export const MESSAGE_SELECTORS = [
   '#chat-container [id^="message-"]',
   '[id^="message-"]',
   "#chat-container [data-message-author-role]",
@@ -176,19 +178,19 @@ const UI_NOISE = new Set(
   ].map((value) => value.toLowerCase()),
 );
 
-class UsageError extends Error {
+export class UsageError extends Error {
   override readonly name = "UsageError";
 }
 
-class ExtractionError extends Error {
+export class ExtractionError extends Error {
   override readonly name = "ExtractionError";
 }
 
-function printHelp(): void {
+export function printHelp(): void {
   console.log(
     `
 Usage:
-  zai-to-markdown [options] <url>
+  zai-scraper [options] <url>
 
 Scrape a Z.ai conversation and save it as Markdown.
 
@@ -219,7 +221,7 @@ Examples:
   );
 }
 
-function parsePositiveInteger(value: string, option: string): number {
+export function parsePositiveInteger(value: string, option: string): number {
   const parsed = Number(value);
 
   if (!Number.isSafeInteger(parsed) || parsed <= 0) {
@@ -231,7 +233,7 @@ function parsePositiveInteger(value: string, option: string): number {
   return parsed;
 }
 
-function parseUrl(value: string): URL {
+export function parseUrl(value: string): URL {
   let url: URL;
 
   try {
@@ -257,19 +259,7 @@ function parseUrl(value: string): URL {
   return url;
 }
 
-function packageVersion(): string {
-  try {
-    const packageJson = JSON.parse(
-      readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "../package.json"), "utf8"),
-    ) as { version?: unknown };
-
-    return typeof packageJson.version === "string" ? packageJson.version : "0.0.0";
-  } catch {
-    return "0.0.0";
-  }
-}
-
-function parseCliOptions(argv: string[]): CliOptions {
+export function parseCliOptions(argv: readonly string[]): CliOptions {
   const cliOptions = {
     output: {
       type: "string",
@@ -315,14 +305,14 @@ function parseCliOptions(argv: string[]): CliOptions {
   } as const;
 
   const { values, positionals } = parseArgs({
-    args: argv,
+    args: [...argv],
     options: cliOptions,
     allowPositionals: true,
     strict: true,
   });
 
   if (values.version) {
-    console.log(packageVersion());
+    console.log(VERSION);
     process.exit(0);
   }
 
@@ -367,17 +357,17 @@ function parseCliOptions(argv: string[]): CliOptions {
   };
 }
 
-function errorMessage(error: unknown): string {
+export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function cleanTitle(title: string | undefined): string {
+export function cleanTitle(title: string | undefined): string {
   const cleaned = title?.replace(TITLE_SUFFIX, "").replace(/\s+/g, " ").trim();
 
   return cleaned || DEFAULT_TITLE;
 }
 
-function cleanFilename(title: string): string {
+export function cleanFilename(title: string): string {
   const filename = title
     .normalize("NFKC")
     .replace(/[<>:"/\\|?*]|[^\x20-\x7e]/g, "")
@@ -388,7 +378,7 @@ function cleanFilename(title: string): string {
   return filename || "zai_conversation";
 }
 
-function configureTurndown(): TurndownService {
+export function configureTurndown(): TurndownService {
   const converter = new TurndownService({
     headingStyle: "atx",
     bulletListMarker: "-",
@@ -441,7 +431,7 @@ function configureTurndown(): TurndownService {
   return converter;
 }
 
-function cleanMarkdown(markdown: string, role: Role): string {
+export function cleanMarkdown(markdown: string, role: Role): string {
   const output: string[] = [];
 
   let openFence:
@@ -683,7 +673,7 @@ function createHistoryCapture(page: Page): HistoryCapture {
     entries,
     async waitForIdle(): Promise<void> {
       while (pending.size > 0) {
-        await Promise.allSettled([...pending]);
+        await Promise.allSettled(pending);
       }
     },
     dispose(): void {
@@ -692,7 +682,7 @@ function createHistoryCapture(page: Page): HistoryCapture {
   };
 }
 
-function mergeCapturedBatchResponses(
+export function mergeCapturedBatchResponses(
   history: ApiHistory,
   entries: readonly CapturedHistoryResponse[],
 ): number {
@@ -719,7 +709,7 @@ function mergeCapturedBatchResponses(
   return Object.keys(history.messages).length - before;
 }
 
-function conversationFromCapturedResponses(
+export function conversationFromCapturedResponses(
   entries: readonly CapturedHistoryResponse[],
 ): { conversation: ApiConversation; endpoint: string } | null {
   for (const entry of [...entries].reverse()) {
@@ -1437,7 +1427,7 @@ function apiAssistantContentBlocks(message: Record<string, unknown>): unknown[] 
   return [];
 }
 
-function extractApiMessageContent(
+export function extractApiMessageContent(
   message: Record<string, unknown>,
   role: Role,
 ): { body: string; thinking: string[] } {
@@ -1515,7 +1505,7 @@ function countApiBranchRoles(history: ApiHistory): {
   return { users, assistants, assistantsWithVisibleContent };
 }
 
-function convertApiHistory(
+export function convertApiHistory(
   history: ApiHistory,
   converter: TurndownService,
   includeThinking: boolean,
@@ -1684,7 +1674,7 @@ async function tryExtractConversationFromApi(
   };
 }
 
-function prependUnseenTurns(existing: RawTurn[], snapshot: RawTurn[]): RawTurn[] {
+export function prependUnseenTurns(existing: RawTurn[], snapshot: RawTurn[]): RawTurn[] {
   const seen = new Set(existing.map((turn) => turn.key));
   const unseen = snapshot.filter((turn) => !seen.has(turn.key));
   return unseen.length === 0 ? existing : [...unseen, ...existing];
@@ -2110,7 +2100,7 @@ function convertTurns(rawTurns: RawTurn[], converter: TurndownService): Message[
   return messages;
 }
 
-function formatDocument(metadata: Metadata, messages: Message[]): string {
+export function formatDocument(metadata: Metadata, messages: Message[]): string {
   const date = new Date().toISOString().slice(0, 10);
   const sections = [
     `# ${metadata.title}`,
@@ -2205,7 +2195,7 @@ async function validateInputFiles(options: CliOptions): Promise<void> {
   }
 }
 
-async function scrapeConversation(options: CliOptions): Promise<ScrapeResult> {
+export async function scrapeConversation(options: CliOptions): Promise<ScrapeResult> {
   await validateInputFiles(options);
 
   console.log(`[-] Launching Chromium in ${options.headed ? "headed" : "headless"} mode`);
@@ -2332,13 +2322,33 @@ async function scrapeConversation(options: CliOptions): Promise<ScrapeResult> {
   }
 }
 
-async function main(): Promise<void> {
+export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<number> {
   registerSigintHandler();
 
-  const options = parseCliOptions(process.argv.slice(2));
-  const result = await scrapeConversation(options);
+  try {
+    const options = parseCliOptions(argv);
+    const result = await scrapeConversation(options);
 
-  console.log(`[+] Saved ${result.messageCount} messages to ${result.outputPath}`);
+    console.log(`[+] Saved ${result.messageCount} messages to ${result.outputPath}`);
+    return 0;
+  } catch (error: unknown) {
+    if (interrupted) {
+      return SIGINT_EXIT_CODE;
+    }
+
+    if (error instanceof UsageError) {
+      console.error(`[!] ${error.message}\n`);
+      printHelp();
+    } else {
+      console.error(`[!] ${errorMessage(error)}`);
+
+      if (error instanceof Error && error.cause !== undefined) {
+        console.error(`    Caused by: ${errorMessage(error.cause)}`);
+      }
+    }
+
+    return 1;
+  }
 }
 
 export const __testing = {
@@ -2355,22 +2365,5 @@ const isMainModule =
   (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url));
 
 if (isMainModule) {
-  main().catch((error: unknown) => {
-    if (interrupted) {
-      return;
-    }
-
-    if (error instanceof UsageError) {
-      console.error(`[!] ${error.message}\n`);
-      printHelp();
-    } else {
-      console.error(`[!] ${errorMessage(error)}`);
-
-      if (error instanceof Error && error.cause !== undefined) {
-        console.error(`    Caused by: ${errorMessage(error.cause)}`);
-      }
-    }
-
-    process.exitCode = 1;
-  });
+  process.exitCode = await main();
 }
