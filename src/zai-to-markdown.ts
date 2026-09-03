@@ -9,40 +9,78 @@ import { chromium, errors as playwrightErrors, type BrowserContext, type Page } 
 import TurndownService from "turndown";
 import turndownPluginGfm from "turndown-plugin-gfm";
 
+/**
+ * The role of a message author in a Z.ai conversation.
+ */
 export type Role = "User" | "Z.ai";
 
+/**
+ * Metadata about a scraped Z.ai conversation.
+ */
 export interface Metadata {
+  /** The title of the conversation. */
   title: string;
+  /** The URL of the conversation. */
   url: string;
 }
 
+/**
+ * A raw turn extracted from the DOM before conversion to Markdown.
+ */
 export interface RawTurn {
+  /** A unique identifier for this turn. */
   key: string;
+  /** The role of the message author, if detected. */
   role: Role | null;
+  /** The raw HTML content of the turn. */
   html: string;
 }
 
+/**
+ * A message in a Z.ai conversation with converted Markdown content.
+ */
 export interface Message {
+  /** The role of the message author. */
   role: Role;
+  /** The message content as Markdown. */
   content: string;
 }
 
+/**
+ * Command-line options for scraping a Z.ai conversation.
+ */
 export interface CliOptions {
+  /** The URL of the Z.ai conversation to scrape. */
   url: URL;
+  /** Output file path for the Markdown. If not provided, a filename is generated from the title. */
   output?: string;
+  /** Path to save the rendered page HTML for debugging. */
   debugHtml?: string;
+  /** Custom CSS selector to override automatic message detection. */
   selector?: string;
+  /** Path to a persistent Chromium profile directory for login state. */
   profileDir?: string;
+  /** Path to load Playwright storage state from. */
   storageState?: string;
+  /** Path to save Playwright storage state after scraping. */
   saveStorageState?: string;
+  /** Navigation and content timeout in milliseconds. */
   timeoutMs: number;
+  /** Whether to show the Chromium browser window. */
   headed: boolean;
+  /** Whether to include Z.ai thinking/reasoning blocks in the output. */
   includeThinking: boolean;
 }
 
+/**
+ * The result of scraping a Z.ai conversation.
+ */
 export interface ScrapeResult {
+  /** The absolute path to the output Markdown file. */
   outputPath: string;
+  /** The number of messages extracted. */
   messageCount: number;
+  /** The CSS selector or API endpoint used for extraction. */
   selector: string;
 }
 
@@ -59,13 +97,23 @@ interface PageJsonResponse {
   error: string | null;
 }
 
+/**
+ * Z.ai API conversation history structure.
+ */
 export interface ApiHistory {
+  /** The ID of the current message in the active branch. */
   currentId: string | null;
+  /** Map of message IDs to their raw API data. */
   messages: Record<string, Record<string, unknown>>;
 }
 
+/**
+ * A Z.ai conversation as returned by the API.
+ */
 export interface ApiConversation {
+  /** The conversation title, if available. */
   title?: string;
+  /** The conversation history from the API. */
   history: ApiHistory;
 }
 
@@ -83,11 +131,19 @@ interface ApiEnrichmentResult {
   branchComplete: boolean;
 }
 
+/**
+ * A captured HTTP response from Z.ai API endpoints.
+ */
 export interface CapturedHistoryResponse {
+  /** The full URL of the response. */
   url: string;
+  /** The HTTP method used. */
   method: string;
+  /** The HTTP status code. */
   status: number;
+  /** The raw response body as text. */
   body: string;
+  /** The parsed response data as JSON, if applicable. */
   data: unknown;
 }
 
@@ -97,10 +153,19 @@ interface HistoryCapture {
   dispose(): void;
 }
 
+/**
+ * The current version of the package.
+ */
 export const VERSION = "1.3.0";
 
+/**
+ * The default title used when no conversation title is detected.
+ */
 export const DEFAULT_TITLE = "Z.ai Conversation";
 
+/**
+ * The default timeout for navigation and content loading in milliseconds.
+ */
 export const DEFAULT_TIMEOUT_MS = 60_000;
 const ZAI_HOSTNAMES = new Set(["chat.z.ai", "www.chat.z.ai"]);
 
@@ -132,10 +197,11 @@ const TITLE_SUFFIX =
 const CONVERSATION_PATH = /^\/(?:c|s)\/[a-z0-9-]+(?:\/|$)/i;
 
 /**
- * Ordered from current Z.ai message roots to progressively broader fallbacks.
+ * CSS selectors for detecting Z.ai message elements, ordered from specific to broad.
  *
- * The first selector producing at least two usable top-level elements wins.
- * A one-turn conversation is still accepted when no selector finds two.
+ * The selectors are tried in order; the first one that produces at least two usable
+ * top-level elements wins. A one-turn conversation is still accepted when no selector
+ * finds two elements.
  */
 export const MESSAGE_SELECTORS = [
   '#chat-container [id^="message-"]',
@@ -178,14 +244,23 @@ const UI_NOISE = new Set(
   ].map((value) => value.toLowerCase()),
 );
 
+/**
+ * Error thrown for invalid command-line usage or input.
+ */
 export class UsageError extends Error {
   override readonly name = "UsageError";
 }
 
+/**
+ * Error thrown when conversation content cannot be extracted from the page.
+ */
 export class ExtractionError extends Error {
   override readonly name = "ExtractionError";
 }
 
+/**
+ * Prints the command-line help text to stdout.
+ */
 export function printHelp(): void {
   console.log(
     `
@@ -221,6 +296,14 @@ Examples:
   );
 }
 
+/**
+ * Parses a string as a positive integer.
+ *
+ * @param value - The string to parse.
+ * @param option - The option name for error messages.
+ * @returns The parsed positive integer.
+ * @throws {UsageError} If the value is not a positive integer.
+ */
 export function parsePositiveInteger(value: string, option: string): number {
   const parsed = Number(value);
 
@@ -233,6 +316,13 @@ export function parsePositiveInteger(value: string, option: string): number {
   return parsed;
 }
 
+/**
+ * Parses and validates a Z.ai conversation URL.
+ *
+ * @param value - The URL string to parse.
+ * @returns The parsed and validated URL.
+ * @throws {UsageError} If the URL is invalid or not a Z.ai conversation URL.
+ */
 export function parseUrl(value: string): URL {
   let url: URL;
 
@@ -259,6 +349,13 @@ export function parseUrl(value: string): URL {
   return url;
 }
 
+/**
+ * Parses command-line arguments into structured options.
+ *
+ * @param argv - The command-line arguments (excluding the executable).
+ * @returns The parsed CLI options.
+ * @throws {UsageError} If arguments are invalid or conflicting.
+ */
 export function parseCliOptions(argv: readonly string[]): CliOptions {
   const cliOptions = {
     output: {
@@ -357,16 +454,36 @@ export function parseCliOptions(argv: readonly string[]): CliOptions {
   };
 }
 
+/**
+ * Converts an unknown error value to a string message.
+ *
+ * @param error - The error value to convert.
+ * @returns A string representation of the error.
+ */
 export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * Cleans a conversation title by removing Z.ai branding suffixes.
+ *
+ * @param title - The raw title to clean.
+ * @returns The cleaned title, or the default title if input is empty.
+ */
 export function cleanTitle(title: string | undefined): string {
   const cleaned = title?.replace(TITLE_SUFFIX, "").replace(/\s+/g, " ").trim();
 
   return cleaned || DEFAULT_TITLE;
 }
 
+/**
+ * Converts a conversation title into a safe filename.
+ *
+ * Removes unsafe characters, normalizes whitespace, and limits length.
+ *
+ * @param title - The title to convert to a filename.
+ * @returns A safe filename string.
+ */
 export function cleanFilename(title: string): string {
   const filename = title
     .normalize("NFKC")
@@ -378,6 +495,14 @@ export function cleanFilename(title: string): string {
   return filename || "zai_conversation";
 }
 
+/**
+ * Creates and configures a TurndownService for HTML-to-Markdown conversion.
+ *
+ * Configures GFM support, removes script/style elements, and adds custom rules
+ * for fenced code blocks with language detection.
+ *
+ * @returns A configured TurndownService instance.
+ */
 export function configureTurndown(): TurndownService {
   const converter = new TurndownService({
     headingStyle: "atx",
@@ -431,6 +556,16 @@ export function configureTurndown(): TurndownService {
   return converter;
 }
 
+/**
+ * Cleans Markdown content by removing UI noise and normalizing structure.
+ *
+ * Removes button labels, collapses multiple newlines, and strips role prefixes.
+ * Preserves code blocks and content within fences.
+ *
+ * @param markdown - The raw Markdown to clean.
+ * @param role - The role of the message author.
+ * @returns The cleaned Markdown content.
+ */
 export function cleanMarkdown(markdown: string, role: Role): string {
   const output: string[] = [];
 
@@ -682,6 +817,16 @@ function createHistoryCapture(page: Page): HistoryCapture {
   };
 }
 
+/**
+ * Merges captured batch API responses into a conversation history.
+ *
+ * Processes responses from `/messages/batch` endpoints and merges their message
+ * data into the provided history object.
+ *
+ * @param history - The API history to merge responses into.
+ * @param entries - The captured HTTP responses to process.
+ * @returns The number of new messages added to the history.
+ */
 export function mergeCapturedBatchResponses(
   history: ApiHistory,
   entries: readonly CapturedHistoryResponse[],
@@ -709,6 +854,15 @@ export function mergeCapturedBatchResponses(
   return Object.keys(history.messages).length - before;
 }
 
+/**
+ * Reconstructs a conversation from captured API responses.
+ *
+ * Searches for conversation data in captured responses and merges any batch
+ * responses to build a complete conversation history.
+ *
+ * @param entries - The captured HTTP responses to process.
+ * @returns The reconstructed conversation with endpoint, or null if no data found.
+ */
 export function conversationFromCapturedResponses(
   entries: readonly CapturedHistoryResponse[],
 ): { conversation: ApiConversation; endpoint: string } | null {
@@ -1427,6 +1581,16 @@ function apiAssistantContentBlocks(message: Record<string, unknown>): unknown[] 
   return [];
 }
 
+/**
+ * Extracts and converts message content from Z.ai API format to Markdown.
+ *
+ * Parses content blocks, separates thinking/reasoning content from the main body,
+ * and handles various API response formats.
+ *
+ * @param message - The raw API message data.
+ * @param role - The role of the message author.
+ * @returns An object with the body content and thinking blocks.
+ */
 export function extractApiMessageContent(
   message: Record<string, unknown>,
   role: Role,
@@ -1505,6 +1669,17 @@ function countApiBranchRoles(history: ApiHistory): {
   return { users, assistants, assistantsWithVisibleContent };
 }
 
+/**
+ * Converts an API conversation history to an array of Markdown messages.
+ *
+ * Processes the active branch of the conversation, extracts content from each
+ * message, and converts it to clean Markdown format.
+ *
+ * @param history - The API conversation history to convert.
+ * @param converter - The configured TurndownService for HTML conversion.
+ * @param includeThinking - Whether to include thinking/reasoning blocks.
+ * @returns An array of converted messages.
+ */
 export function convertApiHistory(
   history: ApiHistory,
   converter: TurndownService,
@@ -1674,6 +1849,15 @@ async function tryExtractConversationFromApi(
   };
 }
 
+/**
+ * Prepends turns from a snapshot that are not already in the existing collection.
+ *
+ * Used for incremental collection to avoid duplicates while preserving order.
+ *
+ * @param existing - The existing collection of turns.
+ * @param snapshot - The new snapshot of turns to merge.
+ * @returns The merged collection with new turns prepended.
+ */
 export function prependUnseenTurns(existing: RawTurn[], snapshot: RawTurn[]): RawTurn[] {
   const seen = new Set(existing.map((turn) => turn.key));
   const unseen = snapshot.filter((turn) => !seen.has(turn.key));
@@ -2100,6 +2284,15 @@ function convertTurns(rawTurns: RawTurn[], converter: TurndownService): Message[
   return messages;
 }
 
+/**
+ * Formats a complete conversation as a Markdown document.
+ *
+ * Adds a header with title, source URL, and scrape date, followed by all messages.
+ *
+ * @param metadata - The conversation metadata.
+ * @param messages - The array of messages to format.
+ * @returns The complete Markdown document.
+ */
 export function formatDocument(metadata: Metadata, messages: Message[]): string {
   const date = new Date().toISOString().slice(0, 10);
   const sections = [
@@ -2195,6 +2388,17 @@ async function validateInputFiles(options: CliOptions): Promise<void> {
   }
 }
 
+/**
+ * Scrapes a Z.ai conversation and saves it as a Markdown file.
+ *
+ * Launches a browser, navigates to the conversation URL, extracts messages via
+ * API or DOM scraping, and writes the result to a file.
+ *
+ * @param options - The scraping options.
+ * @returns The scrape result with output path and message count.
+ * @throws {UsageError} For invalid input options.
+ * @throws {ExtractionError} If conversation content cannot be extracted.
+ */
 export async function scrapeConversation(options: CliOptions): Promise<ScrapeResult> {
   await validateInputFiles(options);
 
@@ -2322,6 +2526,15 @@ export async function scrapeConversation(options: CliOptions): Promise<ScrapeRes
   }
 }
 
+/**
+ * Main entry point for the CLI.
+ *
+ * Parses command-line arguments, scrapes the conversation, and handles errors.
+ * Exits with appropriate status codes.
+ *
+ * @param argv - Command-line arguments (defaults to process.argv).
+ * @returns Exit code (0 for success, 1 for error, 130 for SIGINT).
+ */
 export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<number> {
   registerSigintHandler();
 
@@ -2351,6 +2564,11 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
   }
 }
 
+/**
+ * Internal testing utilities.
+ *
+ * These exports are primarily for internal testing and may change in future versions.
+ */
 export const __testing = {
   configureTurndown,
   convertApiHistory,
