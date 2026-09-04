@@ -24,19 +24,35 @@ It supports both normal conversation URLs (`/c/<id>`) and shared conversation UR
 
 ## Prerequisites
 
-- [Bun](https://bun.sh)
+- One of [Bun](https://bun.sh), [Deno](https://deno.com), or [Node.js](https://nodejs.org)
 - [Playwright Chromium](https://playwright.dev)
 
 ## Setup
+
+### Bun
 
 ```bash
 bun install
 bunx playwright install chromium
 ```
 
+### Deno
+
+```bash
+deno run -A npm:playwright install chromium
+```
+
+### Node.js
+
+```bash
+npm install
+npx playwright install chromium
+```
+
 ## Install
 
 ```bash
+# Bun
 bun add -g zai-conversation-scraper
 # or run without installing
 bunx zai-scraper "https://chat.z.ai/s/<share-id>"
@@ -44,18 +60,33 @@ bunx zai-scraper "https://chat.z.ai/s/<share-id>"
 
 As a library:
 
-```bash
-bunx jsr add @thehouseisonfire/zai-conversation-scraper
-```
-
 ```ts
 import { scrapeConversation } from "@thehouseisonfire/zai-conversation-scraper";
 ```
 
+Install via [`jsr`](https://jsr.io) from any runtime:
+
+```bash
+# Deno
+deno add @thehouseisonfire/zai-conversation-scraper
+# Bun
+bunx jsr add @thehouseisonfire/zai-conversation-scraper
+```
+
 ## Usage
 
-From a source checkout, `bun run scrape` works the same way as the
-`zai-scraper` binary used below.
+```bash
+# Bun
+zai-scraper "https://chat.z.ai/s/<share-id>"
+
+# Deno (from a source checkout)
+deno run -A bin/zai-scraper.ts "https://chat.z.ai/s/<share-id>"
+
+# Node.js (after building)
+node dist/zai-to-markdown.js "https://chat.z.ai/s/<share-id>"
+```
+
+From a source checkout, `bun run scrape` and `deno task scrape` work the same way.
 
 ### Shared conversation
 
@@ -138,8 +169,12 @@ node dist/zai-to-markdown.js "https://chat.z.ai/s/<share-id>"
 
 ## Tests
 
+The test suite uses `node:test`, so it runs on any runtime:
+
 ```bash
-bun run test
+bun test
+deno test -A
+node --test
 ```
 
 The regression suite covers assistant replies stored exclusively in `content_blocks`, reasoning filtering, captured metadata/batch merging, nested role metadata, virtualized-window ordering, and the fallback `content` representation.
