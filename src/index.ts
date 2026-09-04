@@ -25,6 +25,10 @@ export {
   VERSION,
   /** CSS selectors for detecting Z.ai message elements. */
   MESSAGE_SELECTORS,
+  /** Regex pattern for stripping Z.ai branding suffixes from titles. */
+  TITLE_SUFFIX,
+  /** Set of UI noise strings to filter from Markdown content. */
+  UI_NOISE,
 } from "./zai-to-markdown.ts";
 
 // Error types

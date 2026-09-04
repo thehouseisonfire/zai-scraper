@@ -37,6 +37,7 @@
     "scrape": "bun src/zai-to-markdown.ts",
     "zai-scraper": "bun run ./bin/zai-scraper.ts",
     "test": "bun test --path-ignore-patterns \"dist/**\"",
+    "test:node": "node --test src/zai-to-markdown.test.ts src/runtime.test.ts",
     "build": "tsc --project tsconfig.json",
     "start": "node dist/zai-to-markdown.js",
     "lint": "oxlint src/",

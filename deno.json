@@ -1,0 +1,29 @@
+{
+  "name": "@thehouseisonfire/zai-conversation-scraper",
+  "version": "1.3.1",
+  "license": "MIT",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "imports": {
+    "playwright": "npm:playwright@^1.62.1",
+    "turndown": "npm:turndown@^7.2.4",
+    "turndown-plugin-gfm": "npm:turndown-plugin-gfm@^1.0.2",
+    "@types/turndown": "npm:@types/turndown@^5.0.6"
+  },
+  "nodeModulesDir": "auto",
+  "exclude": ["dist"],
+  "compilerOptions": {
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "useUnknownInCatchVariables": true
+  },
+  "tasks": {
+    "scrape": "deno run -A src/zai-to-markdown.ts",
+    "cli": "deno run -A bin/zai-scraper.ts",
+    "test": "deno test -A",
+    "check": "deno check src/ bin/"
+  }
+}

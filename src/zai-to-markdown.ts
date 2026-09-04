@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 
+import process from "node:process";
 import { access, mkdir, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -192,7 +193,7 @@ function registerSigintHandler(): void {
   process.on("SIGINT", onSigint);
 }
 
-const TITLE_SUFFIX =
+export const TITLE_SUFFIX =
   /\s*(?:\||-|—)\s*(?:Z\.ai|ZAI|Chat Z\.ai)(?:\s*-\s*Advanced AI Chatbot[^|]*)?\s*$/i;
 const CONVERSATION_PATH = /^\/(?:c|s)\/[a-z0-9-]+(?:\/|$)/i;
 
@@ -227,7 +228,7 @@ const CONVERSATION_CONTENT_SELECTOR = [
 
 const THINKING_SELECTOR = ".thinking-chain-container, .thinking-block";
 
-const UI_NOISE = new Set(
+export const UI_NOISE = new Set(
   [
     "copy",
     "copied",
@@ -2579,7 +2580,7 @@ export const __testing = {
 };
 
 const isMainModule =
-  import.meta.main ||
+  (import.meta as ImportMeta & { main?: boolean }).main === true ||
   (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url));
 
 if (isMainModule) {

@@ -1,5 +1,6 @@
 node_modules/
 dist/
+deno.lock
 .zai-profile/
 *.storage-state.json
 

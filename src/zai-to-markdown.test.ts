@@ -1,4 +1,5 @@
-import { describe, expect, test } from "bun:test";
+import assert from "node:assert/strict";
+import { describe, test } from "node:test";
 
 import { __testing } from "./zai-to-markdown.ts";
 
@@ -40,7 +41,7 @@ describe("Z.ai API history conversion", () => {
       false,
     );
 
-    expect(messages).toEqual([
+    assert.deepEqual(messages, [
       { role: "User", content: "First question" },
       { role: "Z.ai", content: "First answer" },
       { role: "User", content: "Second question" },
@@ -54,7 +55,7 @@ describe("Z.ai API history conversion", () => {
       true,
     );
 
-    expect(messages[1]).toEqual({
+    assert.deepEqual(messages[1], {
       role: "Z.ai",
       content: "> **Thinking**\n>\n> Internal reasoning\n\nFirst answer",
     });
@@ -83,7 +84,7 @@ describe("Z.ai API history conversion", () => {
       false,
     );
 
-    expect(messages).toEqual([
+    assert.deepEqual(messages, [
       { role: "User", content: "Question" },
       { role: "Z.ai", content: "Nested answer" },
     ]);
@@ -102,7 +103,7 @@ describe("Z.ai API history conversion", () => {
       false,
     );
 
-    expect(messages).toEqual([
+    assert.deepEqual(messages, [
       { role: "User", content: "Question" },
       { role: "Z.ai", content: "Answer" },
     ]);
@@ -149,17 +150,18 @@ describe("captured Z.ai history traffic", () => {
       },
     ]);
 
-    expect(captured?.conversation.title).toBe("Captured conversation");
-    expect(
+    assert.equal(captured?.conversation.title, "Captured conversation");
+    assert.deepEqual(
       __testing.convertApiHistory(
         captured!.conversation.history,
         __testing.configureTurndown(),
         false,
       ),
-    ).toEqual([
-      { role: "User", content: "Question" },
-      { role: "Z.ai", content: "Answer" },
-    ]);
+      [
+        { role: "User", content: "Question" },
+        { role: "Z.ai", content: "Answer" },
+      ],
+    );
   });
 
   test("prepends older virtualized DOM windows without losing the latest turns", () => {
@@ -173,7 +175,7 @@ describe("captured Z.ai history traffic", () => {
       latest[0]!,
     ];
 
-    expect(__testing.prependUnseenTurns(latest, older).map((turn) => turn.key)).toEqual([
+    assert.deepEqual(__testing.prependUnseenTurns(latest, older).map((turn) => turn.key), [
       "message-u1",
       "message-a1",
       "message-u2",
